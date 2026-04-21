@@ -32,6 +32,9 @@ type Listing = {
   vehicle_type: string | null;
   fuel_type: string | null;
   avg_daily_price: number | null;
+  price_7d_avg: number | null;
+  price_14d_avg: number | null;
+  price_30d_avg: number | null;
   completed_trips: number | null;
   rating: number | null;
   is_all_star_host: boolean | null;
@@ -299,13 +302,16 @@ export default function Dashboard() {
                 </Button>
               </div>
             ) : (
-              <div className="rounded-md border">
+              <div className="rounded-md border overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Vehicle</TableHead>
                       <TableHead>City</TableHead>
-                      <TableHead className="text-right">Daily price</TableHead>
+                      <TableHead className="text-right">Now $/day</TableHead>
+                      <TableHead className="text-right">7d avg</TableHead>
+                      <TableHead className="text-right">14d avg</TableHead>
+                      <TableHead className="text-right">30d avg</TableHead>
                       <TableHead className="text-right">Trips</TableHead>
                       <TableHead className="text-right">Rating</TableHead>
                       <TableHead className="text-right">Monthly profit</TableHead>
@@ -332,6 +338,9 @@ export default function Dashboard() {
                           </TableCell>
                           <TableCell className="text-xs">{l.city}</TableCell>
                           <TableCell className="text-right">{fmtUSD(l.avg_daily_price)}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">{fmtUSD(l.price_7d_avg)}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">{fmtUSD(l.price_14d_avg)}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">{fmtUSD(l.price_30d_avg)}</TableCell>
                           <TableCell className="text-right">{l.completed_trips ?? 0}</TableCell>
                           <TableCell className="text-right">{l.rating?.toFixed(2) ?? "—"}</TableCell>
                           <TableCell className="text-right font-semibold">{fmtUSD(l.profit.monthlyProfit)}</TableCell>
