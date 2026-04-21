@@ -91,7 +91,7 @@ export default function Dashboard() {
     },
   });
 
-  const [progress, setProgress] = useState<{ city: string; done: number; total: number; found: number } | null>(null);
+  
 
   const refresh = useMutation({
     mutationFn: async () => {
@@ -194,9 +194,9 @@ export default function Dashboard() {
             </Button>
           </div>
         </div>
-        {progress && (
+        {refresh.isPending && (
           <div className="text-xs text-muted-foreground">
-            Scraping {progress.city}: segment {progress.done}/{progress.total} · {progress.found} unique cars found
+            Full scrape running in the background — all price bands × vehicle types. New cars will appear in 5–10 minutes.
           </div>
         )}
 
