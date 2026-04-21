@@ -7,7 +7,7 @@
 // 4. Writes to Postgres (listings_current / listings_snapshots / price_forecasts / scrape_runs).
 // 5. Dumps listings.json, forecasts.json, runs.json into DATA_DIR for nginx/Caddy to serve.
 
-import { chromium } from "playwright";
+// Note: Playwright removed — Zyte API renders pages server-side.
 import pg from "pg";
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
@@ -550,15 +550,8 @@ async function dumpJson() {
   console.log("Dumped:", meta);
 }
 
-// ---------- Browser launcher (shared with test-scrape.mjs) ----------
-export async function launchBrowser() {
-  return await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
-    ...(PROXY ? { proxy: PROXY } : {}),
-  });
-}
-
+// ---------- Exports for test-scrape.mjs ----------
+export async function launchBrowser() { return null; } // kept for backward compat
 export { scrapeCity, scrapeSegment, CITIES, WINDOWS, PRICE_SEGMENTS, VEHICLE_TYPES, pool };
 
 // ---------- Main ----------
@@ -566,16 +559,13 @@ async function main() {
   const cities = process.argv.slice(2).filter(Boolean);
   const targets = cities.length ? cities : Object.keys(CITIES);
 
-  const browser = await launchBrowser();
-
   try {
     for (const c of targets) {
-      try { await scrapeCity(browser, c); }
+      try { await scrapeCity(null, c); }
       catch (e) { console.error(`City ${c} crashed:`, e); }
     }
     await dumpJson();
   } finally {
-    await browser.close();
     await pool.end();
   }
 }
