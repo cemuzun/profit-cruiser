@@ -410,7 +410,7 @@ Deno.serve(async (req) => {
 
   let body: any = {};
   try { body = await req.json(); } catch (_) {}
-  const cities: string[] = body.cities ?? ["los-angeles", "miami"];
+  const cities: string[] = body.cities ?? ["los-angeles", "miami", "honolulu"];
   const testMode: boolean = body.test === true;
 
   if (testMode) {
