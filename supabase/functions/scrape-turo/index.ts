@@ -69,22 +69,26 @@ function parseProxy(): ProxyConf | null {
   }
 }
 
-function browserHeaders(pathAndQuery: string): string[] {
-  return [
-    `GET ${pathAndQuery} HTTP/1.1`,
+function buildPostRequest(pathAndQuery: string, body: string, refererUrl: string): string {
+  const bodyBytes = new TextEncoder().encode(body).length;
+  const lines = [
+    `POST ${pathAndQuery} HTTP/1.1`,
     `Host: ${TURO_HOST}`,
-    `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
-    `Accept: application/json, text/plain, */*`,
+    `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36`,
+    `Accept: */*`,
     `Accept-Language: en-US,en;q=0.9`,
-    `Referer: https://turo.com/us/en/search`,
+    `Content-Type: application/json`,
+    `Content-Length: ${bodyBytes}`,
+    `Referer: ${refererUrl}`,
     `Origin: https://turo.com`,
-    `X-Requested-With: XMLHttpRequest`,
     `Sec-Fetch-Dest: empty`,
     `Sec-Fetch-Mode: cors`,
     `Sec-Fetch-Site: same-origin`,
     `Connection: close`,
-    `\r\n`, // end of headers
+    ``,
+    ``,
   ];
+  return lines.join("\r\n") + body;
 }
 
 async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, marker: string): Promise<{ head: string; rest: Uint8Array }> {
