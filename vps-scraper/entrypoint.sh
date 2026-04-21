@@ -6,6 +6,9 @@ set -euo pipefail
   echo "DATABASE_URL=${DATABASE_URL}"
   echo "DATA_DIR=${DATA_DIR}"
   echo "TZ=${TZ:-UTC}"
+  echo "PROXY_SERVER=${PROXY_SERVER:-}"
+  echo "PROXY_USERNAME=${PROXY_USERNAME:-}"
+  echo "PROXY_PASSWORD=${PROXY_PASSWORD:-}"
   echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 } > /etc/environment
 
