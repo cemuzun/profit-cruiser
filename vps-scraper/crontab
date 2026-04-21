@@ -1,0 +1,3 @@
+# Every 12h: 08:00 and 20:00 UTC
+0 8,20 * * * root cd /app && /usr/bin/node scraper.mjs >> /var/log/cron.log 2>&1
+# Required trailing newline
