@@ -260,7 +260,31 @@ async function runScrape(cities: string[]) {
     summary.push({ city: citySlug, count: rows.length, segments, error: errorMsg });
   }
 
-  return new Response(JSON.stringify({ ok: true, summary }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  console.log("Scrape summary:", JSON.stringify(summary));
+  return summary;
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch (_) {}
+  const cities: string[] = body.cities ?? ["los-angeles", "miami"];
+
+  // Run scrape in background so we return immediately (avoids 30s client timeout).
+  // @ts-ignore - EdgeRuntime is available in supabase edge runtime
+  EdgeRuntime.waitUntil(
+    runScrape(cities).catch((e) => console.error("Scrape failed:", e)),
+  );
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      message: `Scrape started for ${cities.join(", ")}. Refresh the dashboard in a few minutes.`,
+      cities,
+    }),
+    { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+  );
 });
