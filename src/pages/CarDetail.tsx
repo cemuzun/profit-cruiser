@@ -53,6 +53,20 @@ export default function CarDetail() {
     enabled: !!id,
   });
 
+  const { data: forecasts } = useQuery({
+    queryKey: ["car-forecasts", id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("price_forecasts")
+        .select("scraped_at, window_label, avg_price")
+        .eq("vehicle_id", id!)
+        .order("scraped_at", { ascending: true });
+      if (error) throw error;
+      return data ?? [];
+    },
+    enabled: !!id,
+  });
+
   const { data: override } = useQuery({
     queryKey: ["override", id],
     queryFn: async () => {
