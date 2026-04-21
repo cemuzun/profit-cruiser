@@ -99,7 +99,7 @@ export default function Dashboard() {
 
   const refresh = useMutation({
     mutationFn: async () => {
-      const cities = city === "all" ? ["los-angeles", "miami"] : [city];
+      const cities = city === "all" ? ["los-angeles", "miami", "honolulu"] : [city];
       const toastId = toast.loading(
         `Starting full scrape for ${cities.join(", ")} — this runs in the background and takes 5–10 minutes for ALL cars.`,
       );
