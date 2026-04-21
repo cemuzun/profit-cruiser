@@ -11,19 +11,24 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const CITIES: Record<string, { country: string; name: string }> = {
-  "los-angeles": { country: "US", name: "Los Angeles" },
-  "miami": { country: "US", name: "Miami" },
+const CITIES: Record<string, { country: string; name: string; lat: number; lng: number; region: string; placeId: string }> = {
+  "los-angeles": {
+    country: "US",
+    name: "Los Angeles",
+    lat: 34.0549076,
+    lng: -118.242643,
+    region: "CA",
+    placeId: "ChIJE9on3F3HwoAR9AhGJW_fL-I",
+  },
+  "miami": {
+    country: "US",
+    name: "Miami",
+    lat: 25.7616798,
+    lng: -80.1917902,
+    region: "FL",
+    placeId: "ChIJEcHIDqKw2YgRZU-t3XHylv8",
+  },
 };
-
-const PRICE_SEGMENTS: Array<[number, number]> = [
-  [0, 50],
-  [50, 80],
-  [80, 120],
-  [120, 180],
-  [180, 300],
-  [300, 1000],
-];
 
 const VEHICLE_TYPES = ["CAR", "SUV", "MINIVAN", "TRUCK", "VAN"];
 
