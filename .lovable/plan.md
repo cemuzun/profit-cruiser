@@ -1,70 +1,60 @@
 
 
-# Seasonality Analysis + Compare Cars
+# Use ARN ISP proxies for Turo scraping
 
-Two additions that build directly on the snapshot history we already collect.
+ARN sells **rotating ISP proxies** with a standard `http://user:pass@host:port` endpoint (same format as Bright Data / Smartproxy). As we discovered earlier, the Supabase Edge Runtime's `Deno.createHttpClient({ proxy })` is silently ignored — so a raw HTTP proxy can't be tunneled from inside the edge function. We need a thin **proxy-tunneling layer** between the edge function and ARN.
 
-## 1. Seasonality analysis
+The cleanest fix that keeps using your ARN subscription (no new vendor): run a tiny **Cloudflare Worker** as the tunnel. The edge function `fetch`es the Worker; the Worker forwards through ARN to Turo and streams the response back. Workers fully support proxy `fetch` via a sub-request library, are free up to 100k req/day, and deploy in ~2 minutes.
 
-**Goal:** see how Turo daily prices move by month and by weekday, so utilization/revenue assumptions in the analyzer aren't just a flat 60%.
+## Architecture
 
-**Where it lives:**
-- New page `/seasonality` (added to top nav as "Seasonality")
-- Plus a compact "Seasonality" card on the **Car Detail** page for that specific vehicle
+```text
+Edge Function (Supabase)
+  └── fetch https://<your-worker>.workers.dev?url=<turo>
+        └── Worker → ARN ISP proxy (user:pass@host:port) → turo.com
+              └── JSON response streamed back
+```
 
-**What you'll see on `/seasonality`:**
-- City filter (LA / Miami / both) and optional Make+Model filter
-- **Monthly chart** — bar chart of median daily price for each calendar month (Jan–Dec), with P25/P75 band
-- **Weekday chart** — bar chart of median daily price Mon–Sun, with weekend uplift % shown as a stat
-- **Seasonality multipliers table** — each month and weekday shown as a multiplier vs. annual median (e.g. "July = 1.18×, Tuesday = 0.92×"). These are the numbers you'd plug into utilization estimates.
-- KPI strip: peak month, low month, weekend premium %, sample size (snapshots used)
+## Plan
 
-**On Car Detail:**
-- Small "Seasonality" card with the monthly multiplier mini-chart for just that vehicle (falls back to its make/model if it has too few own snapshots, then to city-wide).
+### 1. Cloudflare Worker (you deploy, ~2 min)
+- I'll give you a ready-to-paste `worker.js` (~40 lines) using `fetch` + `https-proxy-agent` (via `nodejs_compat`).
+- It accepts `?url=<encoded turo URL>`, validates a shared secret header, forwards through `ARN_PROXY_URL`, returns the upstream JSON.
+- You set 2 Worker secrets in the Cloudflare dashboard:
+  - `ARN_PROXY_URL` — your ARN endpoint (`http://user:pass@gate.arnproxy.com:port`)
+  - `TUNNEL_SECRET` — random string, also stored in Lovable Cloud
+- Deploy via Cloudflare dashboard (copy/paste, no CLI needed). You'll get a URL like `https://turo-tunnel.<you>.workers.dev`.
 
-**Data source:** existing `listings_snapshots` table — we already store `avg_daily_price` + `scraped_at` daily, so we group by `EXTRACT(MONTH …)` and `EXTRACT(DOW …)`. No new scraping needed. Quality note: until we have ~30+ days of history, the page will show a "Limited data — collecting since {date}" banner; results get more meaningful with each daily run.
+### 2. Lovable Cloud secrets
+Add two new runtime secrets:
+- `TURO_TUNNEL_URL` — your Worker URL
+- `TURO_TUNNEL_SECRET` — same random string as above
 
-**Wiring into the rest of the app:**
-- Analyzer + Car Detail get a new optional toggle: **"Apply seasonality"** → when on, instead of one flat utilization number, projected monthly revenue is multiplied by that month's seasonality factor and the chart shows 12 monthly profit bars instead of one.
+(The previously-added `TURO_PROXY_URL` becomes unused — we can leave it or remove it.)
 
-## 2. Compare cars page
+### 3. Update `scrape-turo` edge function
+- Remove the dead `Deno.createHttpClient` proxy code.
+- New `fetchSegment` builds the Turo URL as before, then calls:
+  `fetch(`${TUNNEL_URL}?url=${encodeURIComponent(turoUrl)}`, { headers: { 'x-tunnel-secret': SECRET, ...browserHeaders } })`
+- All headers (UA, Accept, Referer, etc.) are forwarded by the Worker to Turo.
+- Same parsing, same upsert logic, same background `EdgeRuntime.waitUntil`.
 
-**Goal:** pick 2–4 watchlist vehicles and judge them head-to-head.
+### 4. Sanity test
+- Add a quick "Test scraper" button on `/settings` (or reuse the Dashboard one) that runs against just LA with 1 segment so you can confirm the tunnel works before the full deep scan kicks off.
+- Surface the result count + any error from the latest `scrape_runs` row.
 
-**Where it lives:** new page `/compare`, added to top nav as "Compare". Also a "Compare selected" button appears on `/watchlist` once you tick 2+ rows (watchlist gets row checkboxes).
+## What I need from you to start
+After you approve, I'll:
+1. Hand you the exact Worker code + step-by-step Cloudflare deploy instructions (5 screenshots' worth of clicks).
+2. Once you paste the Worker URL + secret back, request `TURO_TUNNEL_URL` and `TURO_TUNNEL_SECRET` via the secret tool.
+3. Update the edge function and trigger a test scrape.
 
-**Layout:** side-by-side columns (one per car, up to 4), responsive — stacks on mobile.
+## Why not other options
+- **Direct from edge function**: already proven blocked (403) and proxy config ignored.
+- **Switch to Firecrawl/ScrapingBee**: works but you'd pay twice (you already have ARN).
+- **Self-host a Node proxy on Render/Fly**: works but more setup than a Worker and costs money after free tier.
 
-**Each column shows:**
-- Header: image, year + make + model, city, verdict badge (Excellent / Good / Marginal / Avoid)
-- **Key stats** (rows aligned across columns so your eye can scan):
-  - Avg daily price
-  - Assumed utilization
-  - Monthly gross revenue
-  - Turo fee
-  - Total monthly costs
-  - **Monthly profit** (highlighted, color-coded)
-  - Margin %
-  - Payback months
-  - Purchase price (override or estimate)
-- **Price trend sparkline** (last 30 days from `listings_snapshots`)
-- **Cost breakdown mini bar** (insurance / maintenance / cleaning / depreciation / registration / tires)
-
-**Top of page:**
-- Car picker chips — choose which 2–4 watchlist cars to show (defaults to first 3)
-- "Winner" callout — highlights the car with highest monthly profit and shortest payback
-- Toggle: "Use seasonality-adjusted revenue" (ties into feature #1)
-
-**Empty state:** if watchlist has < 2 cars, show a CTA pointing to the dashboard to bookmark some.
-
-## Technical notes (for reference)
-
-- New file `src/lib/seasonality.ts` — pure functions: `computeMonthlyMultipliers(snapshots)`, `computeWeekdayMultipliers(snapshots)`, `applySeasonality(profit, month, multiplier)`.
-- New hook `src/hooks/useSeasonality.ts` — TanStack Query, params `{ city?, make?, model?, vehicle_id? }`, fetches from `listings_snapshots` (cap last 365 days, limit 5000 rows). Falls back: vehicle → make+model → city → all.
-- New pages: `src/pages/Seasonality.tsx`, `src/pages/Compare.tsx`.
-- Routes added in `src/App.tsx`; nav links added in `src/components/AppNav.tsx` (Seasonality + Compare icons).
-- Watchlist (`src/pages/Watchlist.tsx`) gets row checkboxes + "Compare selected (n)" button → navigates to `/compare?ids=…`.
-- Charts: reuse Recharts (already in project) — `BarChart` for seasonality, small inline `LineChart` for sparklines on Compare.
-- All computations run client-side from snapshots; no schema changes, no new edge functions, no new secrets.
-- Independent of the scraper-fix discussion — works on whatever snapshot data we have (sample or real once scraping is fixed).
+## Out of scope
+- Changing the scraping target/segments — same deep-scan logic.
+- Touching seasonality/compare features — independent.
 
