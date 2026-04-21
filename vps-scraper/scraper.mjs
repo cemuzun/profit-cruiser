@@ -196,7 +196,6 @@ async function scrapeSegment(browser, citySlug, win, minP, maxP, vt) {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     locale: "en-US",
     timezoneId: "America/Los_Angeles",
-    ...(PROXY ? { proxy: PROXY } : {}),
     extraHTTPHeaders: {
       "Accept-Language": "en-US,en;q=0.9",
       "Upgrade-Insecure-Requests": "1",
