@@ -1,5 +1,7 @@
-// Scrape Turo listings for a given city (deep scan via price/vehicle-type segments)
-// Direct fetch to Turo's public search endpoint. May break if Turo changes their API.
+// Scrape Turo via ARN HTTP proxy using a manually-implemented CONNECT tunnel.
+// Supabase Edge Runtime ignores Deno.createHttpClient({ proxy }) in production,
+// so we open a raw TCP socket to the proxy, send "CONNECT turo.com:443", upgrade
+// to TLS with Deno.startTls, then speak HTTP/1.1 over the encrypted stream.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -9,12 +11,11 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const CITIES: Record<string, { country: string; lat: number; lng: number; name: string }> = {
-  "los-angeles": { country: "US", lat: 34.0522, lng: -118.2437, name: "Los Angeles" },
-  "miami": { country: "US", lat: 25.7617, lng: -80.1918, name: "Miami" },
+const CITIES: Record<string, { country: string; name: string }> = {
+  "los-angeles": { country: "US", name: "Los Angeles" },
+  "miami": { country: "US", name: "Miami" },
 };
 
-// Deep scan segments: price brackets x vehicle types
 const PRICE_SEGMENTS: Array<[number, number]> = [
   [0, 50],
   [50, 80],
@@ -26,51 +27,182 @@ const PRICE_SEGMENTS: Array<[number, number]> = [
 
 const VEHICLE_TYPES = ["CAR", "SUV", "MINIVAN", "TRUCK", "VAN"];
 
-const TURO_SEARCH_URL = "https://turo.com/api/v2/search";
+const TURO_HOST = "turo.com";
+const TURO_PORT = 443;
 
-function buildHeaders() {
-  return {
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://turo.com/us/en/search",
-    "Origin": "https://turo.com",
-    "X-Requested-With": "XMLHttpRequest",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-  };
-}
+type ProxyConf = { host: string; port: number; user?: string; pass?: string };
 
-// Build a Deno HTTP client routing through the user's proxy if TURO_PROXY_URL is set.
-// Supports http/https proxies with optional basic auth (http://user:pass@host:port).
-function buildProxyClient(): Deno.HttpClient | undefined {
-  const proxyUrl = Deno.env.get("TURO_PROXY_URL");
-  if (!proxyUrl) return undefined;
+function parseProxy(): ProxyConf | null {
+  const url = Deno.env.get("TURO_PROXY_URL");
+  if (!url) return null;
   try {
-    const u = new URL(proxyUrl);
-    const basicAuth =
-      u.username || u.password
-        ? "Basic " +
-          btoa(
-            `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`,
-          )
-        : undefined;
-    // Strip credentials from URL for the proxy field
-    const cleanUrl = `${u.protocol}//${u.host}`;
-    // @ts-ignore - Deno unstable API; available in supabase edge runtime
-    return Deno.createHttpClient({
-      proxy: { url: cleanUrl, basicAuth: basicAuth ? { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) } : undefined },
-    });
+    const u = new URL(url);
+    return {
+      host: u.hostname,
+      port: Number(u.port) || 80,
+      user: u.username ? decodeURIComponent(u.username) : undefined,
+      pass: u.password ? decodeURIComponent(u.password) : undefined,
+    };
   } catch (e) {
-    console.error("Invalid TURO_PROXY_URL:", (e as Error).message);
-    return undefined;
+    console.error("Bad TURO_PROXY_URL:", (e as Error).message);
+    return null;
   }
 }
 
-let PROXY_CLIENT: Deno.HttpClient | undefined;
+function browserHeaders(pathAndQuery: string): string[] {
+  return [
+    `GET ${pathAndQuery} HTTP/1.1`,
+    `Host: ${TURO_HOST}`,
+    `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
+    `Accept: application/json, text/plain, */*`,
+    `Accept-Language: en-US,en;q=0.9`,
+    `Referer: https://turo.com/us/en/search`,
+    `Origin: https://turo.com`,
+    `X-Requested-With: XMLHttpRequest`,
+    `Sec-Fetch-Dest: empty`,
+    `Sec-Fetch-Mode: cors`,
+    `Sec-Fetch-Site: same-origin`,
+    `Connection: close`,
+    `\r\n`, // end of headers
+  ];
+}
+
+async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, marker: string): Promise<{ head: string; rest: Uint8Array }> {
+  const td = new TextDecoder();
+  let buf = new Uint8Array(0);
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const next = new Uint8Array(buf.length + value.length);
+    next.set(buf);
+    next.set(value, buf.length);
+    buf = next;
+    const text = td.decode(buf, { stream: true });
+    const idx = text.indexOf(marker);
+    if (idx !== -1) {
+      // Find byte offset of marker. Since headers are ASCII, byte == char index.
+      const headBytes = idx + marker.length;
+      return { head: text.slice(0, idx), rest: buf.slice(headBytes) };
+    }
+    if (buf.length > 65536) throw new Error("Header too large");
+  }
+  throw new Error("Connection closed before headers complete");
+}
+
+async function readAll(reader: ReadableStreamDefaultReader<Uint8Array>, initial: Uint8Array): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [initial];
+  let total = initial.length;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+    if (total > 20_000_000) throw new Error("Response too large");
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
+}
+
+// Decode HTTP/1.1 chunked transfer-encoding
+function dechunk(body: Uint8Array): Uint8Array {
+  const td = new TextDecoder();
+  const out: number[] = [];
+  let i = 0;
+  while (i < body.length) {
+    // read size line
+    let lineEnd = -1;
+    for (let j = i; j < body.length - 1; j++) {
+      if (body[j] === 0x0d && body[j + 1] === 0x0a) {
+        lineEnd = j;
+        break;
+      }
+    }
+    if (lineEnd === -1) break;
+    const sizeStr = td.decode(body.slice(i, lineEnd)).trim().split(";")[0];
+    const size = parseInt(sizeStr, 16);
+    if (isNaN(size)) throw new Error(`Bad chunk size: ${sizeStr}`);
+    i = lineEnd + 2;
+    if (size === 0) break;
+    for (let k = 0; k < size; k++) out.push(body[i + k]);
+    i += size + 2; // skip trailing CRLF
+  }
+  return new Uint8Array(out);
+}
+
+async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<any> {
+  // 1. Open raw TCP to proxy
+  const conn = await Deno.connect({ hostname: proxy.host, port: proxy.port });
+
+  try {
+    // 2. Send CONNECT
+    const auth =
+      proxy.user || proxy.pass
+        ? `Proxy-Authorization: Basic ${btoa(`${proxy.user ?? ""}:${proxy.pass ?? ""}`)}\r\n`
+        : "";
+    const connectReq =
+      `CONNECT ${TURO_HOST}:${TURO_PORT} HTTP/1.1\r\n` +
+      `Host: ${TURO_HOST}:${TURO_PORT}\r\n` +
+      auth +
+      `\r\n`;
+    await conn.write(new TextEncoder().encode(connectReq));
+
+    // 3. Read CONNECT response
+    const reader = conn.readable.getReader();
+    const { head: connectHead, rest: leftover } = await readUntil(reader, "\r\n\r\n");
+    if (!/^HTTP\/1\.[01] 200/.test(connectHead)) {
+      throw new Error(`Proxy CONNECT failed: ${connectHead.split("\r\n")[0]}`);
+    }
+    if (leftover.length > 0) {
+      throw new Error("Unexpected data after CONNECT response");
+    }
+    reader.releaseLock();
+
+    // 4. Upgrade socket to TLS
+    const tls = await Deno.startTls(conn, { hostname: TURO_HOST });
+
+    try {
+      // 5. Send HTTP request over TLS
+      const req = browserHeaders(pathAndQuery).join("\r\n");
+      await tls.write(new TextEncoder().encode(req));
+
+      // 6. Read response
+      const tlsReader = tls.readable.getReader();
+      const { head, rest } = await readUntil(tlsReader, "\r\n\r\n");
+      const bodyBytes = await readAll(tlsReader, rest);
+
+      // Parse status
+      const statusLine = head.split("\r\n")[0];
+      const statusMatch = statusLine.match(/HTTP\/1\.[01] (\d+)/);
+      const status = statusMatch ? Number(statusMatch[1]) : 0;
+
+      // Detect chunked
+      const isChunked = /transfer-encoding:\s*chunked/i.test(head);
+      const finalBody = isChunked ? dechunk(bodyBytes) : bodyBytes;
+
+      // Detect gzip — most servers won't gzip if we don't send Accept-Encoding,
+      // and we don't, so we should be fine. But guard:
+      if (/content-encoding:\s*(gzip|br|deflate)/i.test(head)) {
+        throw new Error("Got encoded response — not supported");
+      }
+
+      const text = new TextDecoder().decode(finalBody);
+      if (status !== 200) {
+        throw new Error(`Turo ${status}: ${text.slice(0, 200)}`);
+      }
+      return JSON.parse(text);
+    } finally {
+      try { tls.close(); } catch { /* already closed */ }
+    }
+  } catch (e) {
+    try { conn.close(); } catch { /* ignore */ }
+    throw e;
+  }
+}
 
 function pickupReturnDates() {
   const start = new Date();
@@ -86,12 +218,11 @@ function pickupReturnDates() {
   };
 }
 
-async function fetchSegment(citySlug: string, vehicleType: string, minPrice: number, maxPrice: number) {
+async function fetchSegment(proxy: ProxyConf, citySlug: string, vehicleType: string, minPrice: number, maxPrice: number) {
   const city = CITIES[citySlug];
   if (!city) throw new Error(`Unknown city ${citySlug}`);
   const dates = pickupReturnDates();
 
-  // Try Turo's search API. They use a complex GraphQL-ish endpoint; we'll try the v2 REST search.
   const params = new URLSearchParams({
     country: city.country,
     defaultZoomLevel: "11",
@@ -108,18 +239,7 @@ async function fetchSegment(citySlug: string, vehicleType: string, minPrice: num
     maxDailyPriceUSD: String(maxPrice),
   });
 
-  const url = `${TURO_SEARCH_URL}?${params.toString()}`;
-  const fetchOpts: RequestInit & { client?: Deno.HttpClient } = {
-    headers: buildHeaders(),
-  };
-  if (PROXY_CLIENT) fetchOpts.client = PROXY_CLIENT;
-  const res = await fetch(url, fetchOpts);
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`Turo ${res.status}: ${txt.slice(0, 200)}`);
-  }
-  const data = await res.json();
-  // Response shape varies; try common locations
+  const data = await fetchViaProxy(proxy, `/api/v2/search?${params.toString()}`);
   const list =
     data?.searchResults ??
     data?.vehicles ??
@@ -184,16 +304,19 @@ function normalize(raw: any, citySlug: string) {
   };
 }
 
-async function runScrape(cities: string[]) {
+async function runScrape(cities: string[], testMode = false) {
+  const proxy = parseProxy();
+  if (!proxy) throw new Error("TURO_PROXY_URL not configured");
+  console.log(`Proxy: ${proxy.host}:${proxy.port} auth=${proxy.user ? "yes" : "no"}`);
+
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  PROXY_CLIENT = buildProxyClient();
-  console.log("Proxy configured:", PROXY_CLIENT ? "yes" : "no");
-
   const summary: any[] = [];
+  const vts = testMode ? ["CAR"] : VEHICLE_TYPES;
+  const segs = testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
 
   for (const citySlug of cities) {
     const { data: runRow } = await supabase
@@ -207,42 +330,39 @@ async function runScrape(cities: string[]) {
     let segments = 0;
     let errorMsg: string | null = null;
 
-    for (const vt of VEHICLE_TYPES) {
-      for (const [minP, maxP] of PRICE_SEGMENTS) {
+    for (const vt of vts) {
+      for (const [minP, maxP] of segs) {
         try {
-          const list = await fetchSegment(citySlug, vt, minP, maxP);
+          const list = await fetchSegment(proxy, citySlug, vt, minP, maxP);
           segments++;
           for (const raw of list) {
             const n = normalize(raw, citySlug);
             if (n && !seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
           }
-          // small delay to be polite
-          await new Promise((r) => setTimeout(r, 250));
+          await new Promise((r) => setTimeout(r, 300));
         } catch (e: any) {
           errorMsg = e.message;
-          console.error(`Segment failed ${citySlug}/${vt}/${minP}-${maxP}:`, e.message);
+          console.error(`Segment ${citySlug}/${vt}/${minP}-${maxP}:`, e.message);
         }
       }
     }
 
     const rows = Array.from(seen.values());
-
     if (rows.length > 0) {
-      // Insert snapshots in chunks
       const chunkSize = 200;
       for (let i = 0; i < rows.length; i += chunkSize) {
-        const chunk = rows.slice(i, i + chunkSize);
-        await supabase.from("listings_snapshots").insert(chunk);
+        await supabase.from("listings_snapshots").insert(rows.slice(i, i + chunkSize));
       }
-      // Upsert current
       const currentRows = rows.map(({ raw, ...r }) => ({
         ...r,
         last_scraped_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }));
       for (let i = 0; i < currentRows.length; i += chunkSize) {
-        const chunk = currentRows.slice(i, i + chunkSize);
-        await supabase.from("listings_current").upsert(chunk, { onConflict: "vehicle_id" });
+        await supabase.from("listings_current").upsert(
+          currentRows.slice(i, i + chunkSize),
+          { onConflict: "vehicle_id" },
+        );
       }
     }
 
@@ -268,21 +388,36 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   let body: any = {};
-  try {
-    body = await req.json();
-  } catch (_) {}
+  try { body = await req.json(); } catch (_) {}
   const cities: string[] = body.cities ?? ["los-angeles", "miami"];
+  const testMode: boolean = body.test === true;
 
-  // Run scrape in background so we return immediately (avoids 30s client timeout).
-  // @ts-ignore - EdgeRuntime is available in supabase edge runtime
+  // Test mode: run synchronously and return result so user can see it worked.
+  if (testMode) {
+    try {
+      const result = await runScrape(cities, true);
+      return new Response(
+        JSON.stringify({ ok: true, test: true, result }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    } catch (e: any) {
+      return new Response(
+        JSON.stringify({ ok: false, error: e.message }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+  }
+
+  // Background mode for full scans (avoids client timeout).
+  // @ts-ignore - EdgeRuntime is provided by supabase edge runtime
   EdgeRuntime.waitUntil(
-    runScrape(cities).catch((e) => console.error("Scrape failed:", e)),
+    runScrape(cities, false).catch((e) => console.error("Scrape failed:", e)),
   );
 
   return new Response(
     JSON.stringify({
       ok: true,
-      message: `Scrape started for ${cities.join(", ")}. Refresh the dashboard in a few minutes.`,
+      message: `Scrape started for ${cities.join(", ")}. Check back in a few minutes.`,
       cities,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
