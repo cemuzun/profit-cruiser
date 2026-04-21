@@ -80,6 +80,7 @@ export default function Analyzer() {
                 <SelectContent>
                   <SelectItem value="los-angeles">Los Angeles</SelectItem>
                   <SelectItem value="miami">Miami</SelectItem>
+                  <SelectItem value="honolulu">Honolulu</SelectItem>
                 </SelectContent>
               </Select>
             </div>
