@@ -182,7 +182,7 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold">Market Dashboard</h1>
             <p className="text-sm text-muted-foreground">
-              Most profitable Turo cars in LA & Miami, ranked by estimated monthly profit.
+              Most profitable Turo cars in LA, Miami & Honolulu, ranked by estimated monthly profit.
             </p>
           </div>
           <div className="flex items-center gap-2">
