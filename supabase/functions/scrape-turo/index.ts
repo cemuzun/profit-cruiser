@@ -196,13 +196,27 @@ function normalize(raw: any, citySlug: string) {
   };
 }
 
-async function runScrape(cities: string[]) {
+// Concurrency limiter — Firecrawl has rate limits, keep parallel calls modest.
+async function pAll<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<void> {
+  let idx = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (idx < tasks.length) {
+      const i = idx++;
+      try { await tasks[i](); } catch (_) { /* per-task already handled */ }
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
   const summary: any[] = [];
+  const segs = opts.testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
+  const types = opts.testMode ? [null] : VEHICLE_TYPES;
 
   for (const citySlug of cities) {
     const { data: runRow } = await supabase
@@ -213,21 +227,33 @@ async function runScrape(cities: string[]) {
     const runId = runRow?.id;
 
     const seen = new Map<string, any>();
-    let errorMsg: string | null = null;
+    const errors: string[] = [];
+    let segmentsOk = 0;
 
-    try {
-      const list = await scrapeCity(citySlug);
-      console.log(`${citySlug}: ${list.length} vehicles extracted`);
-      for (const raw of list) {
-        const n = normalize(raw, citySlug);
-        if (!seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
+    const tasks: Array<() => Promise<void>> = [];
+    for (const [minP, maxP] of segs) {
+      for (const vt of types) {
+        tasks.push(async () => {
+          try {
+            const list = await scrapeSegment(citySlug, minP, maxP, vt);
+            segmentsOk++;
+            for (const raw of list) {
+              const n = normalize(raw, citySlug);
+              if (!seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
+            }
+          } catch (e: any) {
+            errors.push(e.message);
+            console.error("Segment failed:", e.message);
+          }
+        });
       }
-    } catch (e: any) {
-      errorMsg = e.message;
-      console.error(`Scrape ${citySlug} failed:`, e.message);
     }
 
+    await pAll(tasks, 3);
+
     const rows = Array.from(seen.values());
+    console.log(`${citySlug}: ${rows.length} unique vehicles across ${segmentsOk}/${tasks.length} segments`);
+
     if (rows.length > 0) {
       const chunkSize = 200;
       for (let i = 0; i < rows.length; i += chunkSize) {
@@ -246,18 +272,19 @@ async function runScrape(cities: string[]) {
       }
     }
 
+    const errorMsg = errors.length > 0 ? errors.slice(0, 3).join(" | ") : null;
     await supabase
       .from("scrape_runs")
       .update({
         status: rows.length > 0 ? "success" : (errorMsg ? "failed" : "empty"),
         vehicles_count: rows.length,
-        segments_run: 1,
+        segments_run: segmentsOk,
         error_message: errorMsg,
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);
 
-    summary.push({ city: citySlug, count: rows.length, error: errorMsg });
+    summary.push({ city: citySlug, count: rows.length, segments: `${segmentsOk}/${tasks.length}`, error: errorMsg });
   }
 
   console.log("Scrape summary:", JSON.stringify(summary));
