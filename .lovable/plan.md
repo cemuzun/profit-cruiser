@@ -1,60 +1,83 @@
 
 
-# Use ARN ISP proxies for Turo scraping
+# Switch Turo scraping to Bright Data Web Unlocker (proven working)
 
-ARN sells **rotating ISP proxies** with a standard `http://user:pass@host:port` endpoint (same format as Bright Data / Smartproxy). As we discovered earlier, the Supabase Edge Runtime's `Deno.createHttpClient({ proxy })` is silently ignored — so a raw HTTP proxy can't be tunneled from inside the edge function. We need a thin **proxy-tunneling layer** between the edge function and ARN.
+We confirmed via curl that **Bright Data Web Unlocker successfully fetches Turo through your `turo_unlocker` zone** (`hl_0465faf5` / password `88wsd9wtxvp1`). HTTP 200, real Turo HTML, 95KB, no `x-brd-error`. The blocker is no longer access — it's that Turo's search results render via client-side JS, so the raw search HTML doesn't contain vehicle data.
 
-The cleanest fix that keeps using your ARN subscription (no new vendor): run a tiny **Cloudflare Worker** as the tunnel. The edge function `fetch`es the Worker; the Worker forwards through ARN to Turo and streams the response back. Workers fully support proxy `fetch` via a sub-request library, are free up to 100k req/day, and deploy in ~2 minutes.
+The fix has two parts: (1) replace the Cloudflare Worker tunnel idea with direct Bright Data calls from the VPS scraper, and (2) keep using **Playwright** (which we already have on the VPS) so JS executes and the `__NEXT_DATA__` / Apollo state populates.
 
 ## Architecture
 
 ```text
-Edge Function (Supabase)
-  └── fetch https://<your-worker>.workers.dev?url=<turo>
-        └── Worker → ARN ISP proxy (user:pass@host:port) → turo.com
-              └── JSON response streamed back
+VPS cron (08:00 / 20:00 UTC)
+  └── scraper.mjs (Playwright + Chromium)
+        └── route through Bright Data Web Unlocker as upstream proxy
+              ├── brd.superproxy.io:33335
+              └── user: brd-customer-hl_0465faf5-zone-turo_unlocker
+        └── opens Turo search pages, waits for JS render
+        └── extracts __NEXT_DATA__ → vehicles → Postgres
+        └── dumps listings.json / forecasts.json / runs.json
+        └── Caddy serves https://187-124-69-23.sslip.io/data/*.json
 ```
+
+No Cloudflare Worker, no edge function changes. The existing Lovable Cloud `scrape-turo` edge function and the `.lovable/plan.md` ARN/Worker plan are abandoned — VPS is now the single scraper.
 
 ## Plan
 
-### 1. Cloudflare Worker (you deploy, ~2 min)
-- I'll give you a ready-to-paste `worker.js` (~40 lines) using `fetch` + `https-proxy-agent` (via `nodejs_compat`).
-- It accepts `?url=<encoded turo URL>`, validates a shared secret header, forwards through `ARN_PROXY_URL`, returns the upstream JSON.
-- You set 2 Worker secrets in the Cloudflare dashboard:
-  - `ARN_PROXY_URL` — your ARN endpoint (`http://user:pass@gate.arnproxy.com:port`)
-  - `TUNNEL_SECRET` — random string, also stored in Lovable Cloud
-- Deploy via Cloudflare dashboard (copy/paste, no CLI needed). You'll get a URL like `https://turo-tunnel.<you>.workers.dev`.
+### 1. Update `vps-scraper/scraper.mjs`
+- Add Playwright launch option to route all browser traffic through Bright Data:
+  ```js
+  const browser = await chromium.launch({
+    proxy: {
+      server: 'http://brd.superproxy.io:33335',
+      username: process.env.BRD_USER, // brd-customer-hl_0465faf5-zone-turo_unlocker
+      password: process.env.BRD_PASS, // 88wsd9wtxvp1
+    },
+    args: ['--ignore-certificate-errors'],
+  });
+  ```
+- Bypass cert validation for the proxy MITM cert (Bright Data signs upstream).
+- Wait for `__NEXT_DATA__` script tag or `networkidle` before extracting.
+- Keep existing extraction logic (LA / Miami / Honolulu × price segments × date windows).
+- On failure, log `x-brd-error` style response from `page.goto()` for debugging.
 
-### 2. Lovable Cloud secrets
-Add two new runtime secrets:
-- `TURO_TUNNEL_URL` — your Worker URL
-- `TURO_TUNNEL_SECRET` — same random string as above
+### 2. Update `vps-scraper/.env.example` and live `.env`
+Add:
+```
+BRD_USER=brd-customer-hl_0465faf5-zone-turo_unlocker
+BRD_PASS=88wsd9wtxvp1
+```
 
-(The previously-added `TURO_PROXY_URL` becomes unused — we can leave it or remove it.)
+### 3. Update `vps-scraper/docker-compose.yml`
+Pass `BRD_USER` and `BRD_PASS` from `.env` into the scraper container's environment.
 
-### 3. Update `scrape-turo` edge function
-- Remove the dead `Deno.createHttpClient` proxy code.
-- New `fetchSegment` builds the Turo URL as before, then calls:
-  `fetch(`${TUNNEL_URL}?url=${encodeURIComponent(turoUrl)}`, { headers: { 'x-tunnel-secret': SECRET, ...browserHeaders } })`
-- All headers (UA, Accept, Referer, etc.) are forwarded by the Worker to Turo.
-- Same parsing, same upsert logic, same background `EdgeRuntime.waitUntil`.
+### 4. Sanity-test script
+Add `vps-scraper/test-scrape.mjs` — runs ONE city × ONE segment, prints vehicle count + first 3 vehicleIds. So you can `docker compose run --rm scraper node test-scrape.mjs` after deploy to verify before the full cron kicks in.
 
-### 4. Sanity test
-- Add a quick "Test scraper" button on `/settings` (or reuse the Dashboard one) that runs against just LA with 1 segment so you can confirm the tunnel works before the full deep scan kicks off.
-- Surface the result count + any error from the latest `scrape_runs` row.
+### 5. Deploy steps (you run on VPS after I push code)
+```bash
+cd /opt/turo-scraper
+git pull   # or scp the updated files
+echo "BRD_USER=brd-customer-hl_0465faf5-zone-turo_unlocker" >> .env
+echo "BRD_PASS=88wsd9wtxvp1" >> .env
+docker compose up -d --build scraper
+docker compose run --rm scraper node test-scrape.mjs   # verify
+docker compose run --rm scraper node scraper.mjs        # full run
+curl -sI https://187-124-69-23.sslip.io/data/listings.json
+```
 
-## What I need from you to start
-After you approve, I'll:
-1. Hand you the exact Worker code + step-by-step Cloudflare deploy instructions (5 screenshots' worth of clicks).
-2. Once you paste the Worker URL + secret back, request `TURO_TUNNEL_URL` and `TURO_TUNNEL_SECRET` via the secret tool.
-3. Update the edge function and trigger a test scrape.
-
-## Why not other options
-- **Direct from edge function**: already proven blocked (403) and proxy config ignored.
-- **Switch to Firecrawl/ScrapingBee**: works but you'd pay twice (you already have ARN).
-- **Self-host a Node proxy on Render/Fly**: works but more setup than a Worker and costs money after free tier.
+### 6. Clean up dead code (optional, same PR)
+- Mark `supabase/functions/scrape-turo/index.ts` and `ingest-listings` as deprecated (add a header comment) or delete them — they're unused now that VPS owns scraping.
+- Delete `.lovable/plan.md` (the ARN/Worker plan we're replacing).
 
 ## Out of scope
-- Changing the scraping target/segments — same deep-scan logic.
-- Touching seasonality/compare features — independent.
+- Frontend changes — `src/lib/dataSource.ts` already reads from `https://187-124-69-23.sslip.io/data/*.json`, no changes needed.
+- Seasonality, watchlist, profitability features — independent.
+- Adding new cities or segments — same scope as today.
+
+## Why this works (and the curl test proved it)
+- ✅ Bright Data zone has no Turo block (HTTP 200 confirmed)
+- ✅ Playwright supports proxy auth natively (unlike Deno Edge Runtime)
+- ✅ Playwright runs JS so `__NEXT_DATA__` populates with real vehicles (the 95KB raw HTML was empty because curl doesn't run JS)
+- ✅ VPS already has Chromium + cron + Postgres + Caddy wired up — minimal change
 
