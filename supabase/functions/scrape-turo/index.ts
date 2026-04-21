@@ -231,156 +231,156 @@ async function pAll<T>(tasks: Array<() => Promise<T>>, concurrency: number): Pro
 
 type WindowAgg = { sum: number; count: number; min: number; max: number };
 
-async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
+async function scrapeCity(
+  supabase: ReturnType<typeof createClient>,
+  citySlug: string,
+  segs: typeof PRICE_SEGMENTS,
+  types: typeof VEHICLE_TYPES,
+  windows: typeof WINDOWS,
+) {
+  // Insert run row IMMEDIATELY so each city is recorded even if the function
+  // times out before completion.
+  const { data: runRow, error: runErr } = await supabase
+    .from("scrape_runs")
+    .insert({ city: citySlug, status: "running" })
+    .select()
+    .single();
+  if (runErr) {
+    console.error(`Failed to create scrape_runs row for ${citySlug}:`, runErr.message);
+  }
+  const runId = runRow?.id;
+  console.log(`▶ ${citySlug}: scrape_runs row=${runId ?? "(none)"}`);
 
-  const summary: any[] = [];
-  const segs = opts.testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
-  const types = opts.testMode ? [null] : VEHICLE_TYPES;
-  const windows = opts.testMode ? [WINDOWS[0], WINDOWS[1]] : WINDOWS;
+  // Per-vehicle accumulator: meta + per-window price stats
+  const vehicles = new Map<string, {
+    base: ReturnType<typeof normalizeBase>;
+    raw: any;
+    windows: Record<WindowKey, WindowAgg>;
+  }>();
 
-  for (const citySlug of cities) {
-    const { data: runRow } = await supabase
-      .from("scrape_runs")
-      .insert({ city: citySlug, status: "running" })
-      .select()
-      .single();
-    const runId = runRow?.id;
+  const errors: string[] = [];
+  let segmentsOk = 0;
 
-    // Per-vehicle accumulator: meta + per-window price stats
-    const vehicles = new Map<string, {
-      base: ReturnType<typeof normalizeBase>;
-      raw: any;
-      windows: Record<WindowKey, WindowAgg>;
-    }>();
+  const tasks: Array<() => Promise<void>> = [];
+  for (const win of windows) {
+    for (const [minP, maxP] of segs) {
+      for (const vt of types) {
+        tasks.push(async () => {
+          try {
+            const list = await scrapeSegment(citySlug, win, minP, maxP, vt);
+            segmentsOk++;
+            for (const raw of list) {
+              const id = deriveId(raw, citySlug);
+              if (!id) continue;
+              const price = Number(raw?.avg_daily_price);
+              if (!Number.isFinite(price) || price <= 0) continue;
 
-    const errors: string[] = [];
-    let segmentsOk = 0;
-
-    const tasks: Array<() => Promise<void>> = [];
-    for (const win of windows) {
-      for (const [minP, maxP] of segs) {
-        for (const vt of types) {
-          tasks.push(async () => {
-            try {
-              const list = await scrapeSegment(citySlug, win, minP, maxP, vt);
-              segmentsOk++;
-              for (const raw of list) {
-                const id = deriveId(raw, citySlug);
-                if (!id) continue;
-                const price = Number(raw?.avg_daily_price);
-                if (!Number.isFinite(price) || price <= 0) continue;
-
-                let entry = vehicles.get(id);
-                if (!entry) {
-                  entry = {
-                    base: normalizeBase(raw, citySlug, id),
-                    raw,
-                    windows: {
-                      now: { sum: 0, count: 0, min: Infinity, max: -Infinity },
-                      "7d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
-                      "14d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
-                      "30d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
-                    },
-                  };
-                  vehicles.set(id, entry);
-                }
-                const agg = entry.windows[win.key];
-                agg.sum += price;
-                agg.count += 1;
-                if (price < agg.min) agg.min = price;
-                if (price > agg.max) agg.max = price;
+              let entry = vehicles.get(id);
+              if (!entry) {
+                entry = {
+                  base: normalizeBase(raw, citySlug, id),
+                  raw,
+                  windows: {
+                    now: { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                    "7d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                    "14d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                    "30d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                  },
+                };
+                vehicles.set(id, entry);
               }
-            } catch (e: any) {
-              errors.push(e.message);
-              console.error("Segment failed:", e.message);
+              const agg = entry.windows[win.key];
+              agg.sum += price;
+              agg.count += 1;
+              if (price < agg.min) agg.min = price;
+              if (price > agg.max) agg.max = price;
             }
-          });
-        }
-      }
-    }
-
-    await pAll(tasks, 3);
-
-    const scrapedAt = new Date().toISOString();
-    const rows: any[] = [];
-    const currentRows: any[] = [];
-    const forecastRows: any[] = [];
-
-    for (const [, entry] of vehicles) {
-      const w = entry.windows;
-      const avg = (a: WindowAgg) => (a.count > 0 ? a.sum / a.count : null);
-      const priceNow = avg(w.now);
-      const price7 = avg(w["7d"]);
-      const price14 = avg(w["14d"]);
-      const price30 = avg(w["30d"]);
-      // avg_daily_price: prefer "now", fall back to 7d if now empty
-      const headlinePrice = priceNow ?? price7 ?? price14 ?? price30;
-
-      const snapshot = {
-        ...entry.base,
-        avg_daily_price: headlinePrice,
-        price_7d_avg: price7,
-        price_14d_avg: price14,
-        price_30d_avg: price30,
-        raw: entry.raw,
-      };
-      rows.push(snapshot);
-
-      const { raw: _r, ...curr } = snapshot as any;
-      currentRows.push({
-        ...curr,
-        last_scraped_at: scrapedAt,
-        updated_at: scrapedAt,
-      });
-
-      // Forecast rows — one per non-empty forward window
-      for (const win of windows) {
-        if (win.key === "now") continue;
-        const a = w[win.key];
-        if (a.count === 0) continue;
-        const start = new Date();
-        start.setUTCDate(start.getUTCDate() + win.offsetDays);
-        const end = new Date(start);
-        end.setUTCDate(end.getUTCDate() + win.spanDays);
-        forecastRows.push({
-          vehicle_id: entry.base.vehicle_id,
-          city: citySlug,
-          window_label: win.key,
-          avg_price: a.sum / a.count,
-          min_price: Number.isFinite(a.min) ? a.min : null,
-          max_price: Number.isFinite(a.max) ? a.max : null,
-          window_start: isoDate(start),
-          window_end: isoDate(end),
-          scraped_at: scrapedAt,
+          } catch (e: any) {
+            errors.push(e.message);
+            console.error("Segment failed:", e.message);
+          }
         });
       }
     }
+  }
 
-    console.log(`${citySlug}: ${rows.length} unique vehicles · ${forecastRows.length} forecast rows · ${segmentsOk}/${tasks.length} segments`);
+  await pAll(tasks, 3);
 
-    const chunkSize = 200;
-    if (rows.length > 0) {
-      for (let i = 0; i < rows.length; i += chunkSize) {
-        await supabase.from("listings_snapshots").insert(rows.slice(i, i + chunkSize));
-      }
-      for (let i = 0; i < currentRows.length; i += chunkSize) {
-        await supabase.from("listings_current").upsert(
-          currentRows.slice(i, i + chunkSize),
-          { onConflict: "vehicle_id" },
-        );
-      }
+  const scrapedAt = new Date().toISOString();
+  const rows: any[] = [];
+  const currentRows: any[] = [];
+  const forecastRows: any[] = [];
+
+  for (const [, entry] of vehicles) {
+    const w = entry.windows;
+    const avg = (a: WindowAgg) => (a.count > 0 ? a.sum / a.count : null);
+    const priceNow = avg(w.now);
+    const price7 = avg(w["7d"]);
+    const price14 = avg(w["14d"]);
+    const price30 = avg(w["30d"]);
+    const headlinePrice = priceNow ?? price7 ?? price14 ?? price30;
+
+    const snapshot = {
+      ...entry.base,
+      avg_daily_price: headlinePrice,
+      price_7d_avg: price7,
+      price_14d_avg: price14,
+      price_30d_avg: price30,
+      raw: entry.raw,
+    };
+    rows.push(snapshot);
+
+    const { raw: _r, ...curr } = snapshot as any;
+    currentRows.push({
+      ...curr,
+      last_scraped_at: scrapedAt,
+      updated_at: scrapedAt,
+    });
+
+    for (const win of windows) {
+      if (win.key === "now") continue;
+      const a = w[win.key];
+      if (a.count === 0) continue;
+      const start = new Date();
+      start.setUTCDate(start.getUTCDate() + win.offsetDays);
+      const end = new Date(start);
+      end.setUTCDate(end.getUTCDate() + win.spanDays);
+      forecastRows.push({
+        vehicle_id: entry.base.vehicle_id,
+        city: citySlug,
+        window_label: win.key,
+        avg_price: a.sum / a.count,
+        min_price: Number.isFinite(a.min) ? a.min : null,
+        max_price: Number.isFinite(a.max) ? a.max : null,
+        window_start: isoDate(start),
+        window_end: isoDate(end),
+        scraped_at: scrapedAt,
+      });
     }
-    if (forecastRows.length > 0) {
-      for (let i = 0; i < forecastRows.length; i += chunkSize) {
-        await supabase.from("price_forecasts").insert(forecastRows.slice(i, i + chunkSize));
-      }
-    }
+  }
 
-    const errorMsg = errors.length > 0 ? errors.slice(0, 3).join(" | ") : null;
+  console.log(`${citySlug}: ${rows.length} unique vehicles · ${forecastRows.length} forecast rows · ${segmentsOk}/${tasks.length} segments`);
+
+  const chunkSize = 200;
+  if (rows.length > 0) {
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      await supabase.from("listings_snapshots").insert(rows.slice(i, i + chunkSize));
+    }
+    for (let i = 0; i < currentRows.length; i += chunkSize) {
+      await supabase.from("listings_current").upsert(
+        currentRows.slice(i, i + chunkSize),
+        { onConflict: "vehicle_id" },
+      );
+    }
+  }
+  if (forecastRows.length > 0) {
+    for (let i = 0; i < forecastRows.length; i += chunkSize) {
+      await supabase.from("price_forecasts").insert(forecastRows.slice(i, i + chunkSize));
+    }
+  }
+
+  const errorMsg = errors.length > 0 ? errors.slice(0, 3).join(" | ") : null;
+  if (runId) {
     await supabase
       .from("scrape_runs")
       .update({
@@ -391,18 +391,45 @@ async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);
-
-    summary.push({
-      city: citySlug,
-      vehicles: rows.length,
-      forecasts: forecastRows.length,
-      segments: `${segmentsOk}/${tasks.length}`,
-      error: errorMsg,
-    });
   }
 
-  console.log("Scrape summary:", JSON.stringify(summary));
-  return summary;
+  return {
+    city: citySlug,
+    vehicles: rows.length,
+    forecasts: forecastRows.length,
+    segments: `${segmentsOk}/${tasks.length}`,
+    error: errorMsg,
+  };
+}
+
+async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+
+  const segs = opts.testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
+  const types = opts.testMode ? [null] : VEHICLE_TYPES;
+  const windows = opts.testMode ? [WINDOWS[0], WINDOWS[1]] : WINDOWS;
+
+  console.log(`Scraping cities in parallel: ${cities.join(", ")}`);
+
+  // Run all cities concurrently. Each city creates its scrape_runs row up
+  // front, so even if the function later times out, every city is recorded.
+  const results = await Promise.all(
+    cities.map((c) =>
+      scrapeCity(supabase, c, segs, types, windows).catch((e) => ({
+        city: c,
+        vehicles: 0,
+        forecasts: 0,
+        segments: "0/0",
+        error: e?.message ?? String(e),
+      })),
+    ),
+  );
+
+  console.log("Scrape summary:", JSON.stringify(results));
+  return results;
 }
 
 Deno.serve(async (req) => {
