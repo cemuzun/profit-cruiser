@@ -163,15 +163,27 @@ async function extractVehicles(page) {
   });
 }
 
-// ---------- Proxy config (ARN Proxy or any HTTP/HTTPS proxy) ----------
-// Set PROXY_SERVER (e.g. "http://gate.arnproxy.com:PORT"), PROXY_USERNAME, PROXY_PASSWORD.
-const PROXY = process.env.PROXY_SERVER
-  ? {
+// ---------- Proxy config ----------
+// Prefer Bright Data Web Unlocker (BRD_USER / BRD_PASS). Falls back to a
+// generic PROXY_SERVER/PROXY_USERNAME/PROXY_PASSWORD trio if Bright Data isn't set.
+function resolveProxy() {
+  if (process.env.BRD_USER && process.env.BRD_PASS) {
+    return {
+      server: process.env.BRD_SERVER || "http://brd.superproxy.io:33335",
+      username: process.env.BRD_USER,
+      password: process.env.BRD_PASS,
+    };
+  }
+  if (process.env.PROXY_SERVER) {
+    return {
       server: process.env.PROXY_SERVER,
       username: process.env.PROXY_USERNAME || undefined,
       password: process.env.PROXY_PASSWORD || undefined,
-    }
-  : null;
+    };
+  }
+  return null;
+}
+export const PROXY = resolveProxy();
 if (PROXY) console.log(`Using proxy: ${PROXY.server} (user=${PROXY.username ? "set" : "none"})`);
 
 // ---------- Per-segment scrape ----------
@@ -467,15 +479,23 @@ async function dumpJson() {
   console.log("Dumped:", meta);
 }
 
+// ---------- Browser launcher (shared with test-scrape.mjs) ----------
+export async function launchBrowser() {
+  return await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
+    ...(PROXY ? { proxy: PROXY } : {}),
+  });
+}
+
+export { scrapeCity, scrapeSegment, CITIES, WINDOWS, PRICE_SEGMENTS, VEHICLE_TYPES, pool };
+
 // ---------- Main ----------
 async function main() {
   const cities = process.argv.slice(2).filter(Boolean);
   const targets = cities.length ? cities : Object.keys(CITIES);
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
-  });
+  const browser = await launchBrowser();
 
   try {
     for (const c of targets) {
@@ -489,4 +509,9 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+// Only run main when invoked directly (not when imported by test-scrape.mjs).
+const isMain = import.meta.url === `file://${process.argv[1]}`;
+if (isMain) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
+
