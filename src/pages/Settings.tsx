@@ -7,8 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
-import { DEFAULT_GLOBAL, type GlobalCosts } from "@/lib/profitability";
+import { DEFAULT_GLOBAL, type GlobalCosts, type AcquisitionMode } from "@/lib/profitability";
+import { Info } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { format } from "date-fns";
 import { toast } from "sonner";
 
@@ -41,6 +44,7 @@ export default function Settings() {
   });
 
   const set = (k: keyof GlobalCosts) => (e: any) => setForm({ ...form, [k]: Number(e.target.value) });
+  const setMode = (v: string) => setForm({ ...form, default_acquisition_mode: v as AcquisitionMode });
 
   return (
     <div className="min-h-screen bg-background">
@@ -62,7 +66,39 @@ export default function Settings() {
               <Field label="Registration / month ($)" value={form.registration_monthly} onChange={set("registration_monthly")} />
               <Field label="Tires / month ($)" value={form.tires_monthly} onChange={set("tires_monthly")} />
               <Field label="Default purchase price ($)" value={form.default_purchase_price} onChange={set("default_purchase_price")} />
-              <Field label="Trips/month estimate" value={form.trips_per_month_estimate} onChange={set("trips_per_month_estimate")} />
+              <Field
+                label="Trips/month estimate"
+                value={form.trips_per_month_estimate}
+                onChange={set("trips_per_month_estimate")}
+                hint="How many separate rentals per month at 60% utilization. Drives cleaning cost (cleaning/trip × trips × utilization adjustment) and estimated miles driven."
+              />
+            </div>
+
+            <div className="pt-2">
+              <h3 className="font-medium mb-2">Acquisition (buy vs. lease) defaults</h3>
+              <div className="flex items-center gap-3 mb-3">
+                <Label className="text-sm">Default mode</Label>
+                <Tabs value={form.default_acquisition_mode} onValueChange={setMode}>
+                  <TabsList>
+                    <TabsTrigger value="buy">Buy</TabsTrigger>
+                    <TabsTrigger value="lease">Lease</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <Field label="Default lease $/mo" value={form.default_lease_monthly} onChange={set("default_lease_monthly")} />
+                <Field label="Default lease down ($)" value={form.default_lease_down} onChange={set("default_lease_down")} />
+                <Field label="Default lease term (mo)" value={form.default_lease_term_months} onChange={set("default_lease_term_months")} />
+              </div>
+            </div>
+
+            <div className="pt-2">
+              <h3 className="font-medium mb-2">Mileage defaults</h3>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <Field label="Mileage cap / month" value={form.default_mileage_cap_monthly} onChange={set("default_mileage_cap_monthly")} hint="Typical lease: 12,000 mi/yr ≈ 1,000/mo. For buys, treat as the threshold beyond which extra wear hits." />
+                <Field label="Overage $/mile" value={form.default_mileage_overage_per_mi} onChange={set("default_mileage_overage_per_mi")} />
+                <Field label="Avg miles per trip" value={form.default_avg_miles_per_trip} onChange={set("default_avg_miles_per_trip")} />
+              </div>
             </div>
             <div className="flex gap-2 pt-2">
               <Button onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>
@@ -97,10 +133,22 @@ export default function Settings() {
   );
 }
 
-function Field({ label, value, onChange }: { label: string; value: number; onChange: (e: any) => void }) {
+function Field({ label, value, onChange, hint }: { label: string; value: number; onChange: (e: any) => void; hint?: string }) {
   return (
     <div>
-      <Label>{label}</Label>
+      <Label className="flex items-center gap-1">
+        {label}
+        {hint && (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+              </TooltipTrigger>
+              <TooltipContent className="max-w-xs"><p className="text-xs">{hint}</p></TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
+      </Label>
       <Input type="number" value={value} onChange={onChange} />
     </div>
   );

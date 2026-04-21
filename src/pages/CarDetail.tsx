@@ -7,8 +7,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
-import { computeProfit, fmtUSD, fmtPct, verdict, type CostOverride } from "@/lib/profitability";
+import { computeProfit, fmtUSD, fmtPct, verdict, type CostOverride, type AcquisitionMode } from "@/lib/profitability";
 import { ArrowLeft, Bookmark, BookmarkCheck, Loader2 } from "lucide-react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { format } from "date-fns";
@@ -65,14 +66,22 @@ export default function CarDetail() {
   const [form, setForm] = useState<CostOverride>({});
   useEffect(() => {
     if (override) {
+      const o: any = override;
       setForm({
-        utilization_pct: override.utilization_pct ?? undefined,
-        turo_fee_pct: override.turo_fee_pct ?? undefined,
-        insurance_monthly: override.insurance_monthly ?? undefined,
-        maintenance_monthly: override.maintenance_monthly ?? undefined,
-        cleaning_per_trip: override.cleaning_per_trip ?? undefined,
-        depreciation_pct_annual: override.depreciation_pct_annual ?? undefined,
-        purchase_price: override.purchase_price ?? undefined,
+        utilization_pct: o.utilization_pct ?? undefined,
+        turo_fee_pct: o.turo_fee_pct ?? undefined,
+        insurance_monthly: o.insurance_monthly ?? undefined,
+        maintenance_monthly: o.maintenance_monthly ?? undefined,
+        cleaning_per_trip: o.cleaning_per_trip ?? undefined,
+        depreciation_pct_annual: o.depreciation_pct_annual ?? undefined,
+        purchase_price: o.purchase_price ?? undefined,
+        acquisition_mode: (o.acquisition_mode ?? undefined) as AcquisitionMode | undefined,
+        lease_monthly: o.lease_monthly ?? undefined,
+        lease_down: o.lease_down ?? undefined,
+        lease_term_months: o.lease_term_months ?? undefined,
+        mileage_cap_monthly: o.mileage_cap_monthly ?? undefined,
+        mileage_overage_per_mi: o.mileage_overage_per_mi ?? undefined,
+        avg_miles_per_trip: o.avg_miles_per_trip ?? undefined,
       });
     }
   }, [override]);
@@ -81,6 +90,8 @@ export default function CarDetail() {
     if (!car || !globalCosts) return null;
     return computeProfit(car as any, globalCosts, form);
   }, [car, globalCosts, form]);
+
+  const mode: AcquisitionMode = form.acquisition_mode ?? globalCosts?.default_acquisition_mode ?? "buy";
 
   const save = useMutation({
     mutationFn: async () => {
@@ -185,6 +196,7 @@ export default function CarDetail() {
               <h2 className="font-semibold mb-3">Profitability</h2>
               {profit && (
                 <dl className="text-sm space-y-1.5">
+                  <Row label="Mode" value={profit.acquisitionMode === "lease" ? "Lease" : "Buy"} />
                   <Row label="Daily price" value={fmtUSD(profit.dailyPrice)} />
                   <Row label="Utilization" value={fmtPct(profit.utilizationPct)} />
                   <Row label="Gross revenue/mo" value={fmtUSD(profit.monthlyRevenueGross)} />
@@ -194,15 +206,29 @@ export default function CarDetail() {
                   <Row label="Insurance" value={`-${fmtUSD(profit.costInsurance)}`} />
                   <Row label="Maintenance" value={`-${fmtUSD(profit.costMaintenance)}`} />
                   <Row label="Cleaning" value={`-${fmtUSD(profit.costCleaning)}`} />
-                  <Row label="Depreciation" value={`-${fmtUSD(profit.costDepreciation)}`} />
+                  {profit.acquisitionMode === "buy" ? (
+                    <Row label="Depreciation" value={`-${fmtUSD(profit.costDepreciation)}`} />
+                  ) : (
+                    <Row label="Lease (incl. down/mo)" value={`-${fmtUSD(profit.costLease)}`} />
+                  )}
                   <Row label="Registration" value={`-${fmtUSD(profit.costRegistration)}`} />
                   <Row label="Tires" value={`-${fmtUSD(profit.costTires)}`} />
+                  <Row
+                    label={`Mileage overage (~${Math.round(profit.estimatedMilesPerMonth)} mi/mo)`}
+                    value={profit.costMileageOverage > 0 ? `-${fmtUSD(profit.costMileageOverage)}` : "$0"}
+                  />
                   <Row label="Total costs" value={`-${fmtUSD(profit.totalCost)}`} bold />
                   <hr className="my-2 border-border" />
                   <Row label="Monthly profit" value={fmtUSD(profit.monthlyProfit)} bold />
                   <Row label="Margin" value={fmtPct(profit.marginPct, 1)} />
-                  <Row label="Payback" value={profit.paybackMonths ? `${profit.paybackMonths.toFixed(0)} mo` : "—"} />
-                  <Row label="Purchase price" value={fmtUSD(profit.purchasePrice)} />
+                  <Row
+                    label={profit.acquisitionMode === "lease" ? "Down payback" : "Payback"}
+                    value={profit.paybackMonths ? `${profit.paybackMonths.toFixed(0)} mo` : "—"}
+                  />
+                  <Row
+                    label={profit.acquisitionMode === "lease" ? "Lease down" : "Purchase price"}
+                    value={fmtUSD(profit.upfrontCost)}
+                  />
                 </dl>
               )}
             </CardContent>
@@ -210,18 +236,57 @@ export default function CarDetail() {
         </div>
 
         <Card>
-          <CardContent className="pt-4">
-            <h2 className="font-semibold mb-3">Edit cost assumptions for this car</h2>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Field label="Purchase price" value={form.purchase_price} onChange={(v) => setForm({ ...form, purchase_price: v })} />
-              <Field label="Utilization %" value={form.utilization_pct} onChange={(v) => setForm({ ...form, utilization_pct: v })} />
-              <Field label="Turo fee %" value={form.turo_fee_pct} onChange={(v) => setForm({ ...form, turo_fee_pct: v })} />
-              <Field label="Insurance/mo" value={form.insurance_monthly} onChange={(v) => setForm({ ...form, insurance_monthly: v })} />
-              <Field label="Maintenance/mo" value={form.maintenance_monthly} onChange={(v) => setForm({ ...form, maintenance_monthly: v })} />
-              <Field label="Cleaning/trip" value={form.cleaning_per_trip} onChange={(v) => setForm({ ...form, cleaning_per_trip: v })} />
-              <Field label="Depreciation %/yr" value={form.depreciation_pct_annual} onChange={(v) => setForm({ ...form, depreciation_pct_annual: v })} />
+          <CardContent className="pt-4 space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <h2 className="font-semibold">Edit cost assumptions for this car</h2>
+              <Tabs
+                value={mode}
+                onValueChange={(v) => setForm({ ...form, acquisition_mode: v as AcquisitionMode })}
+              >
+                <TabsList>
+                  <TabsTrigger value="buy">Buy</TabsTrigger>
+                  <TabsTrigger value="lease">Lease</TabsTrigger>
+                </TabsList>
+              </Tabs>
             </div>
-            <div className="mt-3 flex gap-2">
+
+            {mode === "buy" ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Field label="Purchase price" value={form.purchase_price} onChange={(v) => setForm({ ...form, purchase_price: v })} />
+                <Field label="Depreciation %/yr" value={form.depreciation_pct_annual} onChange={(v) => setForm({ ...form, depreciation_pct_annual: v })} />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Field label="Lease $/mo" value={form.lease_monthly} onChange={(v) => setForm({ ...form, lease_monthly: v })} />
+                <Field label="Down payment $" value={form.lease_down} onChange={(v) => setForm({ ...form, lease_down: v })} />
+                <Field label="Term (months)" value={form.lease_term_months} onChange={(v) => setForm({ ...form, lease_term_months: v })} />
+              </div>
+            )}
+
+            <div>
+              <h3 className="text-sm font-medium mb-2 text-muted-foreground">Mileage</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Field label="Mileage cap / mo" value={form.mileage_cap_monthly} onChange={(v) => setForm({ ...form, mileage_cap_monthly: v })} />
+                <Field label="Overage $/mile" value={form.mileage_overage_per_mi} onChange={(v) => setForm({ ...form, mileage_overage_per_mi: v })} step="0.01" />
+                <Field label="Avg miles per trip" value={form.avg_miles_per_trip} onChange={(v) => setForm({ ...form, avg_miles_per_trip: v })} />
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                Estimated miles/mo = trips/mo × avg miles per trip. Overage applies in both buy and lease modes (lease has hard caps; for buys this proxies extra wear).
+              </p>
+            </div>
+
+            <div>
+              <h3 className="text-sm font-medium mb-2 text-muted-foreground">Operating costs</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Field label="Utilization %" value={form.utilization_pct} onChange={(v) => setForm({ ...form, utilization_pct: v })} />
+                <Field label="Turo fee %" value={form.turo_fee_pct} onChange={(v) => setForm({ ...form, turo_fee_pct: v })} />
+                <Field label="Insurance/mo" value={form.insurance_monthly} onChange={(v) => setForm({ ...form, insurance_monthly: v })} />
+                <Field label="Maintenance/mo" value={form.maintenance_monthly} onChange={(v) => setForm({ ...form, maintenance_monthly: v })} />
+                <Field label="Cleaning/trip" value={form.cleaning_per_trip} onChange={(v) => setForm({ ...form, cleaning_per_trip: v })} />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
               <Button onClick={() => save.mutate()} disabled={save.isPending}>Save overrides</Button>
               <Button variant="ghost" onClick={() => setForm({})}>Reset to global</Button>
             </div>
@@ -241,12 +306,15 @@ function Row({ label, value, bold }: { label: string; value: string; bold?: bool
   );
 }
 
-function Field({ label, value, onChange }: { label: string; value: number | undefined | null; onChange: (v: number | undefined) => void }) {
+function Field({
+  label, value, onChange, step,
+}: { label: string; value: number | undefined | null; onChange: (v: number | undefined) => void; step?: string }) {
   return (
     <div>
       <Label className="text-xs">{label}</Label>
       <Input
         type="number"
+        step={step}
         value={value ?? ""}
         onChange={(e) => {
           const v = e.target.value;
