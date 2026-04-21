@@ -34,7 +34,27 @@ const CITIES: Record<
   },
 };
 
-function buildSearchUrl(city: typeof CITIES[string]): string {
+// Price segments cover the full Turo range; narrow segments give better extraction recall
+// since Firecrawl's JSON extractor sees more of the listings on each page.
+const PRICE_SEGMENTS: Array<[number, number]> = [
+  [0, 40],
+  [40, 60],
+  [60, 80],
+  [80, 110],
+  [110, 150],
+  [150, 220],
+  [220, 350],
+  [350, 1000],
+];
+
+const VEHICLE_TYPES: Array<string | null> = [null, "CAR", "SUV", "MINIVAN", "TRUCK", "VAN"];
+
+function buildSearchUrl(
+  city: typeof CITIES[string],
+  minPrice?: number,
+  maxPrice?: number,
+  vehicleType?: string | null,
+): string {
   const params = new URLSearchParams({
     age: "30",
     country: city.country,
@@ -51,6 +71,9 @@ function buildSearchUrl(city: typeof CITIES[string]): string {
     searchDurationType: "DAILY",
     sortType: "RELEVANCE",
   });
+  if (minPrice !== undefined) params.set("minDailyPriceUSD", String(minPrice));
+  if (maxPrice !== undefined) params.set("maxDailyPriceUSD", String(maxPrice));
+  if (vehicleType) params.set("types", vehicleType);
   return `https://turo.com/us/en/search?${params.toString()}`;
 }
 
