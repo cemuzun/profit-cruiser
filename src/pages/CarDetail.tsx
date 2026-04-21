@@ -138,6 +138,20 @@ export default function CarDetail() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist", id] }),
   });
 
+  const forecastChartData = useMemo(() => {
+    const buckets = new Map<string, { day: string; ts: number; "7d"?: number; "14d"?: number; "30d"?: number }>();
+    for (const f of (forecasts ?? []) as any[]) {
+      const d = new Date(f.scraped_at);
+      const key = format(d, "yyyy-MM-dd");
+      const existing = buckets.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
+      const label = f.window_label as "7d" | "14d" | "30d";
+      const price = Number(f.avg_price);
+      if (Number.isFinite(price)) (existing as any)[label] = price;
+      buckets.set(key, existing);
+    }
+    return Array.from(buckets.values()).sort((a, b) => a.ts - b.ts);
+  }, [forecasts]);
+
   if (!car) {
     return (
       <div className="min-h-screen bg-background">
@@ -155,20 +169,6 @@ export default function CarDetail() {
     price: Number(h.avg_daily_price) || 0,
     trips: h.completed_trips ?? 0,
   }));
-
-  const forecastChartData = useMemo(() => {
-    const buckets = new Map<string, { day: string; ts: number; "7d"?: number; "14d"?: number; "30d"?: number }>();
-    for (const f of (forecasts ?? []) as any[]) {
-      const d = new Date(f.scraped_at);
-      const key = format(d, "yyyy-MM-dd");
-      const existing = buckets.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
-      const label = f.window_label as "7d" | "14d" | "30d";
-      const price = Number(f.avg_price);
-      if (Number.isFinite(price)) (existing as any)[label] = price;
-      buckets.set(key, existing);
-    }
-    return Array.from(buckets.values()).sort((a, b) => a.ts - b.ts);
-  }, [forecasts]);
 
   return (
     <div className="min-h-screen bg-background">
