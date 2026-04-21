@@ -233,6 +233,40 @@ export default function CarDetail() {
             </CardContent>
           </Card>
 
+          <Card className="lg:col-span-3">
+            <CardContent className="pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="font-semibold">Forward price trends</h2>
+                <p className="text-xs text-muted-foreground">
+                  How 7d / 14d / 30d forecast averages have moved across each scrape
+                </p>
+              </div>
+              <div className="h-64">
+                {forecastChartData.length > 1 ? (
+                  <ResponsiveContainer>
+                    <LineChart data={forecastChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `$${v}`} />
+                      <Tooltip
+                        contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
+                        formatter={(val: any) => (val == null ? "—" : `$${Number(val).toFixed(0)}`)}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Line type="monotone" dataKey="7d" name="Next 7d avg" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls />
+                      <Line type="monotone" dataKey="14d" name="Next 14d avg" stroke="hsl(var(--accent-foreground))" strokeWidth={2} dot={false} connectNulls />
+                      <Line type="monotone" dataKey="30d" name="Next 30d avg" stroke="hsl(var(--muted-foreground))" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                    Need 2+ refreshes to show forward trend
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardContent className="pt-4">
               <h2 className="font-semibold mb-3">Profitability</h2>
