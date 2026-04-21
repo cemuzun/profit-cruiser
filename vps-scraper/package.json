@@ -4,7 +4,9 @@
   "type": "module",
   "version": "1.0.0",
   "scripts": {
-    "scrape": "node scraper.mjs"
+    "scrape": "node scraper.mjs",
+    "test:scrape": "node test-scrape.mjs",
+    "debug:zyte": "node debug-zyte.mjs"
   },
   "dependencies": {
     "pg": "^8.13.1",
