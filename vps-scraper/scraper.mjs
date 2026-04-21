@@ -163,70 +163,142 @@ async function extractVehicles(page) {
   });
 }
 
-// ---------- Proxy config ----------
-// Prefer Bright Data Web Unlocker (BRD_USER / BRD_PASS). Falls back to a
-// generic PROXY_SERVER/PROXY_USERNAME/PROXY_PASSWORD trio if Bright Data isn't set.
-function resolveProxy() {
-  if (process.env.BRD_USER && process.env.BRD_PASS) {
-    return {
-      server: process.env.BRD_SERVER || "http://brd.superproxy.io:33335",
-      username: process.env.BRD_USER,
-      password: process.env.BRD_PASS,
-    };
-  }
-  if (process.env.PROXY_SERVER) {
-    return {
-      server: process.env.PROXY_SERVER,
-      username: process.env.PROXY_USERNAME || undefined,
-      password: process.env.PROXY_PASSWORD || undefined,
-    };
-  }
-  return null;
+// ---------- Zyte API client ----------
+// Uses Zyte API browserHtml mode: Zyte renders the page in a real browser on
+// their side (anti-bot bypass + JS execution included) and returns the final
+// HTML. We then parse __NEXT_DATA__ / Apollo state out of that HTML.
+const ZYTE_API_KEY = process.env.ZYTE_API_KEY;
+if (!ZYTE_API_KEY) {
+  console.error("ZYTE_API_KEY is required");
+  process.exit(1);
 }
-export const PROXY = resolveProxy();
-if (PROXY) console.log(`Using proxy: ${PROXY.server} (user=${PROXY.username ? "set" : "none"})`);
+const ZYTE_AUTH = "Basic " + Buffer.from(`${ZYTE_API_KEY}:`).toString("base64");
+
+async function zyteFetch(url, { retries = 2 } = {}) {
+  const body = {
+    url,
+    browserHtml: true,
+    javascript: true,
+    geolocation: "US",
+    viewport: { width: 1366, height: 900 },
+    actions: [
+      // Wait for hydration so __NEXT_DATA__ is filled and Apollo cache populated
+      { action: "waitForTimeout", timeout: 4 },
+    ],
+  };
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch("https://api.zyte.com/v1/extract", {
+        method: "POST",
+        headers: {
+          Authorization: ZYTE_AUTH,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`Zyte HTTP ${res.status}: ${txt.slice(0, 200)}`);
+      }
+      const json = await res.json();
+      if (!json.browserHtml) throw new Error("Zyte returned no browserHtml");
+      return json.browserHtml;
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await new Promise(r => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+// ---------- HTML extractor (no browser) ----------
+// Pulls vehicle objects out of __NEXT_DATA__ / inline Apollo state inside raw HTML.
+function extractVehiclesFromHtml(html) {
+  const out = [];
+  const seen = new Set();
+
+  function pushFromAny(node) {
+    if (!node || typeof node !== "object") return;
+    const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
+    const price =
+      node.avgDailyPrice ??
+      node.dailyPrice ??
+      node.dailyPriceWithCurrency?.amount ??
+      node.dailyPricing?.dailyPrice ??
+      node.price?.amount;
+    const make = node.make ?? node.vehicle?.make ?? node.makeName;
+    const model = node.model ?? node.vehicle?.model ?? node.modelName;
+    if (id && price && (make || model)) {
+      const vid = String(id);
+      if (seen.has(vid)) return;
+      seen.add(vid);
+      out.push({
+        vehicle_id: vid,
+        make: make ?? null,
+        model: model ?? null,
+        year: Number(node.year ?? node.vehicle?.year) || null,
+        trim: node.trim ?? node.vehicle?.trim ?? null,
+        vehicle_type: node.type ?? node.vehicle?.type ?? null,
+        fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
+        avg_daily_price: Number(price) || null,
+        completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
+        rating: Number(node.rating ?? node.hostRating ?? node.avgRating) || null,
+        is_all_star_host: Boolean(node.isAllStarHost ?? node.host?.isAllStarHost),
+        host_name: node.hostName ?? node.host?.firstName ?? null,
+        image_url:
+          node.images?.[0]?.originalImageUrl ??
+          node.images?.[0]?.url ??
+          node.imageUrls?.[0] ??
+          node.image?.originalImageUrl ??
+          null,
+        location_city: node.location?.city ?? node.locationCity ?? null,
+        location_state: node.location?.state ?? node.locationState ?? null,
+      });
+    }
+  }
+
+  function walk(v, depth = 0) {
+    if (depth > 10 || v == null) return;
+    if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
+    if (typeof v === "object") {
+      pushFromAny(v);
+      for (const k in v) walk(v[k], depth + 1);
+    }
+  }
+
+  // 1. __NEXT_DATA__
+  const nextMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextMatch) {
+    try { walk(JSON.parse(nextMatch[1])); } catch (_) {}
+  }
+
+  // 2. Inline Apollo / initial state assignments
+  for (const re of [
+    /window\.__APOLLO_STATE__\s*=\s*({[\s\S]*?});\s*<\/script>/,
+    /window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});\s*<\/script>/,
+  ]) {
+    const m = html.match(re);
+    if (m) {
+      try { walk(JSON.parse(m[1])); } catch (_) {}
+    }
+  }
+
+  return out;
+}
 
 // ---------- Per-segment scrape ----------
-async function scrapeSegment(browser, citySlug, win, minP, maxP, vt) {
+async function scrapeSegment(_unused, citySlug, win, minP, maxP, vt) {
   const url = buildSearchUrl(CITIES[citySlug], win, minP, maxP, vt);
   const label = `${citySlug}/${win.key}/${vt ?? "ALL"}/$${minP}-${maxP}`;
-  const ctx = await browser.newContext({
-    viewport: { width: 1366, height: 900 },
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    locale: "en-US",
-    timezoneId: "America/Los_Angeles",
-    extraHTTPHeaders: {
-      "Accept-Language": "en-US,en;q=0.9",
-      "Upgrade-Insecure-Requests": "1",
-    },
-  });
-  // Mask the most obvious headless fingerprints.
-  await ctx.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
-    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
-    // @ts-ignore
-    window.chrome = { runtime: {} };
-  });
-  const page = await ctx.newPage();
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
-    // Wait for either the Next data script or the search results to mount.
-    await page.waitForFunction(
-      () => !!document.getElementById("__NEXT_DATA__") || document.querySelectorAll("[data-testid*='vehicle']").length > 0,
-      { timeout: 15000 },
-    ).catch(() => {});
-    // Small settle for client-side hydration to fill prices.
-    await page.waitForTimeout(2500);
-    const vehicles = await extractVehicles(page);
-    console.log(`  ${label}: ${vehicles.length} vehicles`);
+    const html = await zyteFetch(url);
+    const vehicles = extractVehiclesFromHtml(html);
+    console.log(`  ${label}: ${vehicles.length} vehicles (html ${html.length}b)`);
     return vehicles;
   } catch (e) {
     console.error(`  ${label} FAILED: ${e.message}`);
     return [];
-  } finally {
-    await ctx.close();
   }
 }
 
