@@ -1,6 +1,5 @@
-// Scrape Turo via Firecrawl. Firecrawl renders the search page with a real
-// browser, bypassing Cloudflare, and we extract the listing JSON either from
-// the page's __NEXT_DATA__ / hydration script or via Firecrawl's JSON-extract.
+// Scrape Turo via Firecrawl across multiple date windows so we capture
+// forward-looking pricing (now, next 7d, next 14d, next 30d) per vehicle.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -34,27 +33,42 @@ const CITIES: Record<
   },
 };
 
-// Price segments cover the full Turo range; narrow segments give better extraction recall
-// since Firecrawl's JSON extractor sees more of the listings on each page.
 const PRICE_SEGMENTS: Array<[number, number]> = [
-  [0, 40],
-  [40, 60],
-  [60, 80],
-  [80, 110],
-  [110, 150],
-  [150, 220],
-  [220, 350],
-  [350, 1000],
+  [0, 40], [40, 60], [60, 80], [80, 110],
+  [110, 150], [150, 220], [220, 350], [350, 1000],
 ];
 
 const VEHICLE_TYPES: Array<string | null> = [null, "CAR", "SUV", "MINIVAN", "TRUCK", "VAN"];
 
+type WindowKey = "now" | "7d" | "14d" | "30d";
+
+// Forward-looking windows. "now" = ~7 days out (Turo requires future dates),
+// then 7d, 14d, 30d further out, each spanning 3 days for the search.
+const WINDOWS: Array<{ key: WindowKey; offsetDays: number; spanDays: number; label: string }> = [
+  { key: "now", offsetDays: 1, spanDays: 3, label: "Now" },
+  { key: "7d", offsetDays: 7, spanDays: 3, label: "+7d" },
+  { key: "14d", offsetDays: 14, spanDays: 3, label: "+14d" },
+  { key: "30d", offsetDays: 30, spanDays: 3, label: "+30d" },
+];
+
+function isoDate(d: Date) {
+  return d.toISOString().slice(0, 10);
+}
+
 function buildSearchUrl(
   city: typeof CITIES[string],
+  win: typeof WINDOWS[number],
   minPrice?: number,
   maxPrice?: number,
   vehicleType?: string | null,
-): string {
+): { url: string; pickup: string; dropoff: string } {
+  const start = new Date();
+  start.setUTCDate(start.getUTCDate() + win.offsetDays);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + win.spanDays);
+  const pickup = isoDate(start);
+  const dropoff = isoDate(end);
+
   const params = new URLSearchParams({
     age: "30",
     country: city.country,
@@ -70,14 +84,21 @@ function buildSearchUrl(
     region: city.region,
     searchDurationType: "DAILY",
     sortType: "RELEVANCE",
+    pickupDate: pickup,
+    pickupTime: "10:00",
+    dropoffDate: dropoff,
+    dropoffTime: "10:00",
   });
   if (minPrice !== undefined) params.set("minDailyPriceUSD", String(minPrice));
   if (maxPrice !== undefined) params.set("maxDailyPriceUSD", String(maxPrice));
   if (vehicleType) params.set("types", vehicleType);
-  return `https://turo.com/us/en/search?${params.toString()}`;
+  return {
+    url: `https://turo.com/us/en/search?${params.toString()}`,
+    pickup,
+    dropoff,
+  };
 }
 
-// Firecrawl JSON extraction schema for Turo listings on the search page.
 const VEHICLE_SCHEMA = {
   type: "object",
   properties: {
@@ -91,9 +112,9 @@ const VEHICLE_SCHEMA = {
           model: { type: "string" },
           year: { type: "number" },
           trim: { type: "string" },
-          vehicle_type: { type: "string", description: "CAR, SUV, TRUCK, etc." },
+          vehicle_type: { type: "string" },
           fuel_type: { type: "string" },
-          avg_daily_price: { type: "number", description: "Daily price in USD" },
+          avg_daily_price: { type: "number" },
           completed_trips: { type: "number" },
           rating: { type: "number" },
           is_all_star_host: { type: "boolean" },
@@ -101,7 +122,7 @@ const VEHICLE_SCHEMA = {
           image_url: { type: "string" },
           location_city: { type: "string" },
           location_state: { type: "string" },
-          listing_url: { type: "string", description: "Absolute URL to the car detail page" },
+          listing_url: { type: "string" },
         },
         required: ["make", "model", "avg_daily_price"],
       },
@@ -112,6 +133,7 @@ const VEHICLE_SCHEMA = {
 
 async function scrapeSegment(
   citySlug: string,
+  win: typeof WINDOWS[number],
   minPrice: number,
   maxPrice: number,
   vehicleType: string | null,
@@ -121,26 +143,20 @@ async function scrapeSegment(
   const city = CITIES[citySlug];
   if (!city) throw new Error(`Unknown city ${citySlug}`);
 
-  const url = buildSearchUrl(city, minPrice, maxPrice, vehicleType);
-  const label = `${citySlug}/${vehicleType ?? "ALL"}/$${minPrice}-${maxPrice}`;
-  console.log(`Firecrawl scrape: ${label}`);
+  const { url } = buildSearchUrl(city, win, minPrice, maxPrice, vehicleType);
+  const label = `${citySlug}/${win.key}/${vehicleType ?? "ALL"}/$${minPrice}-${maxPrice}`;
+  console.log(`Firecrawl: ${label}`);
 
   const res = await fetch(`${FIRECRAWL_V2}/scrape`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       url,
-      formats: [
-        {
-          type: "json",
-          schema: VEHICLE_SCHEMA,
-          prompt:
-            "Extract EVERY car listing visible on this Turo search results page — do not skip any. For each vehicle return: vehicle_id (numeric ID from listing URL), make, model, year, daily price in USD, completed trips count, host rating, host name, image URL, and the absolute listing URL.",
-        },
-      ],
+      formats: [{
+        type: "json",
+        schema: VEHICLE_SCHEMA,
+        prompt: "Extract EVERY car listing visible on this Turo search results page — do not skip any. For each vehicle return: vehicle_id (numeric ID from listing URL), make, model, year, daily price in USD for the displayed dates, completed trips, host rating, host name, image URL, and the absolute listing URL.",
+      }],
       onlyMainContent: false,
       waitFor: 5000,
       location: { country: "US", languages: ["en-US"] },
@@ -151,26 +167,26 @@ async function scrapeSegment(
   if (!res.ok) {
     throw new Error(`Firecrawl ${res.status} (${label}): ${JSON.stringify(data).slice(0, 300)}`);
   }
-
   const json = data?.data?.json ?? data?.json ?? {};
   const vehicles = Array.isArray(json?.vehicles) ? json.vehicles : [];
   console.log(`  ${label}: ${vehicles.length} vehicles`);
   return vehicles;
 }
 
-function normalize(raw: any, citySlug: string) {
-  // Derive vehicle_id from listing_url if missing (URL contains /car-rental/.../<id>/).
+function deriveId(raw: any, citySlug: string): string | null {
   let id: string | null = raw?.vehicle_id ? String(raw.vehicle_id) : null;
   if (!id && typeof raw?.listing_url === "string") {
     const m = raw.listing_url.match(/\/(\d+)(?:\/?$|\?)/);
     if (m) id = m[1];
   }
   if (!id) {
-    // Last resort: deterministic hash-ish from make+model+year+price+host
-    const seed = `${raw?.make}-${raw?.model}-${raw?.year}-${raw?.avg_daily_price}-${raw?.host_name}`;
+    const seed = `${raw?.make}-${raw?.model}-${raw?.year}-${raw?.host_name}`;
     id = `synth-${citySlug}-${btoa(seed).replace(/[^a-zA-Z0-9]/g, "").slice(0, 24)}`;
   }
+  return id;
+}
 
+function normalizeBase(raw: any, citySlug: string, id: string) {
   return {
     vehicle_id: id,
     city: citySlug,
@@ -180,7 +196,6 @@ function normalize(raw: any, citySlug: string) {
     trim: raw?.trim ?? null,
     vehicle_type: raw?.vehicle_type ?? null,
     fuel_type: raw?.fuel_type ?? null,
-    avg_daily_price: Number(raw?.avg_daily_price) || null,
     currency: "USD",
     completed_trips: Number(raw?.completed_trips) || 0,
     rating: Number(raw?.rating) || null,
@@ -192,11 +207,9 @@ function normalize(raw: any, citySlug: string) {
     location_state: raw?.location_state ?? null,
     latitude: null,
     longitude: null,
-    raw,
   };
 }
 
-// Concurrency limiter — Firecrawl has rate limits, keep parallel calls modest.
 async function pAll<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<void> {
   let idx = 0;
   const workers = Array.from({ length: concurrency }, async () => {
@@ -208,6 +221,8 @@ async function pAll<T>(tasks: Array<() => Promise<T>>, concurrency: number): Pro
   await Promise.all(workers);
 }
 
+type WindowAgg = { sum: number; count: number; min: number; max: number };
+
 async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -217,6 +232,7 @@ async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
   const summary: any[] = [];
   const segs = opts.testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
   const types = opts.testMode ? [null] : VEHICLE_TYPES;
+  const windows = opts.testMode ? [WINDOWS[0], WINDOWS[1]] : WINDOWS;
 
   for (const citySlug of cities) {
     const { data: runRow } = await supabase
@@ -226,49 +242,133 @@ async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
       .single();
     const runId = runRow?.id;
 
-    const seen = new Map<string, any>();
+    // Per-vehicle accumulator: meta + per-window price stats
+    const vehicles = new Map<string, {
+      base: ReturnType<typeof normalizeBase>;
+      raw: any;
+      windows: Record<WindowKey, WindowAgg>;
+    }>();
+
     const errors: string[] = [];
     let segmentsOk = 0;
 
     const tasks: Array<() => Promise<void>> = [];
-    for (const [minP, maxP] of segs) {
-      for (const vt of types) {
-        tasks.push(async () => {
-          try {
-            const list = await scrapeSegment(citySlug, minP, maxP, vt);
-            segmentsOk++;
-            for (const raw of list) {
-              const n = normalize(raw, citySlug);
-              if (!seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
+    for (const win of windows) {
+      for (const [minP, maxP] of segs) {
+        for (const vt of types) {
+          tasks.push(async () => {
+            try {
+              const list = await scrapeSegment(citySlug, win, minP, maxP, vt);
+              segmentsOk++;
+              for (const raw of list) {
+                const id = deriveId(raw, citySlug);
+                if (!id) continue;
+                const price = Number(raw?.avg_daily_price);
+                if (!Number.isFinite(price) || price <= 0) continue;
+
+                let entry = vehicles.get(id);
+                if (!entry) {
+                  entry = {
+                    base: normalizeBase(raw, citySlug, id),
+                    raw,
+                    windows: {
+                      now: { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                      "7d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                      "14d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                      "30d": { sum: 0, count: 0, min: Infinity, max: -Infinity },
+                    },
+                  };
+                  vehicles.set(id, entry);
+                }
+                const agg = entry.windows[win.key];
+                agg.sum += price;
+                agg.count += 1;
+                if (price < agg.min) agg.min = price;
+                if (price > agg.max) agg.max = price;
+              }
+            } catch (e: any) {
+              errors.push(e.message);
+              console.error("Segment failed:", e.message);
             }
-          } catch (e: any) {
-            errors.push(e.message);
-            console.error("Segment failed:", e.message);
-          }
-        });
+          });
+        }
       }
     }
 
     await pAll(tasks, 3);
 
-    const rows = Array.from(seen.values());
-    console.log(`${citySlug}: ${rows.length} unique vehicles across ${segmentsOk}/${tasks.length} segments`);
+    const scrapedAt = new Date().toISOString();
+    const rows: any[] = [];
+    const currentRows: any[] = [];
+    const forecastRows: any[] = [];
 
+    for (const [, entry] of vehicles) {
+      const w = entry.windows;
+      const avg = (a: WindowAgg) => (a.count > 0 ? a.sum / a.count : null);
+      const priceNow = avg(w.now);
+      const price7 = avg(w["7d"]);
+      const price14 = avg(w["14d"]);
+      const price30 = avg(w["30d"]);
+      // avg_daily_price: prefer "now", fall back to 7d if now empty
+      const headlinePrice = priceNow ?? price7 ?? price14 ?? price30;
+
+      const snapshot = {
+        ...entry.base,
+        avg_daily_price: headlinePrice,
+        price_7d_avg: price7,
+        price_14d_avg: price14,
+        price_30d_avg: price30,
+        raw: entry.raw,
+      };
+      rows.push(snapshot);
+
+      const { raw: _r, ...curr } = snapshot as any;
+      currentRows.push({
+        ...curr,
+        last_scraped_at: scrapedAt,
+        updated_at: scrapedAt,
+      });
+
+      // Forecast rows — one per non-empty forward window
+      for (const win of windows) {
+        if (win.key === "now") continue;
+        const a = w[win.key];
+        if (a.count === 0) continue;
+        const start = new Date();
+        start.setUTCDate(start.getUTCDate() + win.offsetDays);
+        const end = new Date(start);
+        end.setUTCDate(end.getUTCDate() + win.spanDays);
+        forecastRows.push({
+          vehicle_id: entry.base.vehicle_id,
+          city: citySlug,
+          window_label: win.key,
+          avg_price: a.sum / a.count,
+          min_price: Number.isFinite(a.min) ? a.min : null,
+          max_price: Number.isFinite(a.max) ? a.max : null,
+          window_start: isoDate(start),
+          window_end: isoDate(end),
+          scraped_at: scrapedAt,
+        });
+      }
+    }
+
+    console.log(`${citySlug}: ${rows.length} unique vehicles · ${forecastRows.length} forecast rows · ${segmentsOk}/${tasks.length} segments`);
+
+    const chunkSize = 200;
     if (rows.length > 0) {
-      const chunkSize = 200;
       for (let i = 0; i < rows.length; i += chunkSize) {
         await supabase.from("listings_snapshots").insert(rows.slice(i, i + chunkSize));
       }
-      const currentRows = rows.map(({ raw, ...r }) => ({
-        ...r,
-        last_scraped_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      }));
       for (let i = 0; i < currentRows.length; i += chunkSize) {
         await supabase.from("listings_current").upsert(
           currentRows.slice(i, i + chunkSize),
           { onConflict: "vehicle_id" },
         );
+      }
+    }
+    if (forecastRows.length > 0) {
+      for (let i = 0; i < forecastRows.length; i += chunkSize) {
+        await supabase.from("price_forecasts").insert(forecastRows.slice(i, i + chunkSize));
       }
     }
 
@@ -284,7 +384,13 @@ async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
       })
       .eq("id", runId);
 
-    summary.push({ city: citySlug, count: rows.length, segments: `${segmentsOk}/${tasks.length}`, error: errorMsg });
+    summary.push({
+      city: citySlug,
+      vehicles: rows.length,
+      forecasts: forecastRows.length,
+      segments: `${segmentsOk}/${tasks.length}`,
+      error: errorMsg,
+    });
   }
 
   console.log("Scrape summary:", JSON.stringify(summary));
@@ -314,6 +420,7 @@ Deno.serve(async (req) => {
     }
   }
 
+  const totalSegments = PRICE_SEGMENTS.length * VEHICLE_TYPES.length * WINDOWS.length;
   // @ts-ignore - EdgeRuntime
   EdgeRuntime.waitUntil(
     runScrape(cities, { testMode: false }).catch((e) => console.error("Scrape failed:", e)),
@@ -322,8 +429,9 @@ Deno.serve(async (req) => {
   return new Response(
     JSON.stringify({
       ok: true,
-      message: `Full scrape started for ${cities.join(", ")} (${PRICE_SEGMENTS.length} price bands × ${VEHICLE_TYPES.length} vehicle types per city). Check back in 5-10 minutes.`,
+      message: `Full scrape started for ${cities.join(", ")} — ${totalSegments} segments per city across ${WINDOWS.length} date windows (now, +7d, +14d, +30d). Takes 10–20 min.`,
       cities,
+      windows: WINDOWS.map((w) => w.key),
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
   );

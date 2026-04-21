@@ -10,6 +10,14 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict, type CostOverride, type AcquisitionMode } from "@/lib/profitability";
+function PriceTile({ label, value }: { label: string; value: number | null | undefined }) {
+  return (
+    <div className="border border-border rounded-md p-2">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-sm font-semibold">{fmtUSD(value)}</div>
+    </div>
+  );
+}
 import { ArrowLeft, Bookmark, BookmarkCheck, Loader2 } from "lucide-react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 import { format } from "date-fns";
@@ -161,6 +169,12 @@ export default function CarDetail() {
                     {car.completed_trips ?? 0} trips · {car.rating?.toFixed(2) ?? "—"}★
                     {car.is_all_star_host && <span className="ml-2 text-warning">All-Star host</span>}
                   </p>
+                  <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <PriceTile label="Now" value={car.avg_daily_price} />
+                    <PriceTile label="Next 7 days" value={(car as any).price_7d_avg} />
+                    <PriceTile label="Next 14 days" value={(car as any).price_14d_avg} />
+                    <PriceTile label="Next 30 days" value={(car as any).price_30d_avg} />
+                  </div>
                   <Button
                     variant="outline" size="sm" className="mt-3"
                     onClick={() => toggleWatch.mutate()}
