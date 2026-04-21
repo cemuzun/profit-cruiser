@@ -1,7 +1,7 @@
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect, useMemo } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { ds, userStore } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -32,9 +32,8 @@ export default function CarDetail() {
   const { data: car } = useQuery({
     queryKey: ["car", id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("listings_current").select("*").eq("vehicle_id", id!).maybeSingle();
-      if (error) throw error;
-      return data;
+      const list = await ds.listings();
+      return list.find((l) => l.vehicle_id === id) ?? null;
     },
     enabled: !!id,
   });
@@ -42,13 +41,10 @@ export default function CarDetail() {
   const { data: history } = useQuery({
     queryKey: ["car-history", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("listings_snapshots")
-        .select("scraped_at, avg_daily_price, completed_trips")
-        .eq("vehicle_id", id!)
-        .order("scraped_at", { ascending: true });
-      if (error) throw error;
-      return data ?? [];
+      const snaps = await ds.snapshots();
+      return snaps
+        .filter((s) => s.vehicle_id === id)
+        .sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
     },
     enabled: !!id,
   });
@@ -56,32 +52,23 @@ export default function CarDetail() {
   const { data: forecasts } = useQuery({
     queryKey: ["car-forecasts", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("price_forecasts")
-        .select("scraped_at, window_label, avg_price")
-        .eq("vehicle_id", id!)
-        .order("scraped_at", { ascending: true });
-      if (error) throw error;
-      return data ?? [];
+      const all = await ds.forecasts();
+      return all
+        .filter((f) => f.vehicle_id === id)
+        .sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
     },
     enabled: !!id,
   });
 
   const { data: override } = useQuery({
     queryKey: ["override", id],
-    queryFn: async () => {
-      const { data } = await supabase.from("cost_overrides").select("*").eq("vehicle_id", id!).maybeSingle();
-      return data;
-    },
+    queryFn: async () => userStore.getOverride(id!),
     enabled: !!id,
   });
 
   const { data: inWatchlist } = useQuery({
     queryKey: ["watchlist", id],
-    queryFn: async () => {
-      const { data } = await supabase.from("watchlist").select("vehicle_id").eq("vehicle_id", id!).maybeSingle();
-      return !!data;
-    },
+    queryFn: async () => userStore.isWatched(id!),
     enabled: !!id,
   });
 
@@ -117,25 +104,24 @@ export default function CarDetail() {
 
   const save = useMutation({
     mutationFn: async () => {
-      const payload: any = { vehicle_id: id, ...form, updated_at: new Date().toISOString() };
-      const { error } = await supabase.from("cost_overrides").upsert(payload, { onConflict: "vehicle_id" });
-      if (error) throw error;
+      userStore.setOverride(id!, form as any);
     },
     onSuccess: () => {
-      toast.success("Costs saved");
+      toast.success("Costs saved (browser-local)");
       qc.invalidateQueries({ queryKey: ["override", id] });
     },
   });
 
   const toggleWatch = useMutation({
     mutationFn: async () => {
-      if (inWatchlist) {
-        await supabase.from("watchlist").delete().eq("vehicle_id", id!);
-      } else {
-        await supabase.from("watchlist").insert({ vehicle_id: id! });
-      }
+      if (inWatchlist) userStore.removeWatch(id!);
+      else userStore.addWatch(id!);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist", id] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["watchlist", id] });
+      qc.invalidateQueries({ queryKey: ["watchlist-full"] });
+      qc.invalidateQueries({ queryKey: ["watchlist-compare-pool"] });
+    },
   });
 
   const forecastChartData = useMemo(() => {

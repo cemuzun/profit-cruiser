@@ -1,0 +1,28 @@
+# Auto-HTTPS via Let's Encrypt against the sslip.io hostname mapped to the VPS IP.
+{$PUBLIC_HOSTNAME} {
+	encode gzip
+
+	# CORS — allow your Lovable preview + published domains to fetch the JSON.
+	header /data/* {
+		Access-Control-Allow-Origin "*"
+		Access-Control-Allow-Methods "GET, OPTIONS"
+		Access-Control-Allow-Headers "Content-Type"
+		Cache-Control "public, max-age=300"
+	}
+
+	@options method OPTIONS
+	respond @options 204
+
+	handle_path /data/* {
+		root * /srv/data
+		file_server browse
+	}
+
+	handle / {
+		respond "turo-scraper ok" 200
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

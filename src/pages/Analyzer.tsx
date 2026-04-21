@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
+import { ds } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -26,16 +26,17 @@ export default function Analyzer() {
   const { data: comps } = useQuery({
     queryKey: ["comps", make, model, city, year],
     queryFn: async () => {
-      let q = supabase
-        .from("listings_current")
-        .select("*")
-        .eq("city", city)
-        .ilike("make", make)
-        .ilike("model", `%${model}%`);
-      if (year) q = q.gte("year", year - 2).lte("year", year + 2);
-      const { data, error } = await q.limit(50);
-      if (error) throw error;
-      return data ?? [];
+      const all = await ds.listings();
+      const mk = make.toLowerCase().trim();
+      const md = model.toLowerCase().trim();
+      return all.filter(c => {
+        if (c.city !== city) return false;
+        if ((c.make ?? "").toLowerCase() !== mk) return false;
+        if (!(c.model ?? "").toLowerCase().includes(md)) return false;
+        if (year && (c.year ?? 0) < year - 2) return false;
+        if (year && (c.year ?? 9999) > year + 2) return false;
+        return true;
+      }).slice(0, 50);
     },
     enabled: submitted && !!make && !!model,
   });
@@ -96,7 +97,7 @@ export default function Analyzer() {
           <>
             {!stats ? (
               <Card><CardContent className="pt-4 text-sm text-muted-foreground">
-                No comparable listings found in our database for {make} {model} in {city}. Try running a scrape on the Dashboard, or adjust the search.
+                No comparable listings found in our database for {make} {model} in {city}. The VPS scraper publishes fresh data every 12h — check back after the next run.
               </CardContent></Card>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
