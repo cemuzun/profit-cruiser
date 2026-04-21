@@ -19,7 +19,7 @@ function PriceTile({ label, value }: { label: string; value: number | null | und
   );
 }
 import { ArrowLeft, Bookmark, BookmarkCheck, Loader2 } from "lucide-react";
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { VerdictBadge } from "./Dashboard";
