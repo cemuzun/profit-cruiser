@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persist DATABASE_URL + DATA_DIR for cron jobs (cron strips env)
+# Persist DATABASE_URL + DATA_DIR + proxy env for cron jobs (cron strips env)
 {
   echo "DATABASE_URL=${DATABASE_URL}"
   echo "DATA_DIR=${DATA_DIR}"
   echo "TZ=${TZ:-UTC}"
+  echo "BRD_USER=${BRD_USER:-}"
+  echo "BRD_PASS=${BRD_PASS:-}"
+  echo "BRD_SERVER=${BRD_SERVER:-}"
   echo "PROXY_SERVER=${PROXY_SERVER:-}"
   echo "PROXY_USERNAME=${PROXY_USERNAME:-}"
   echo "PROXY_PASSWORD=${PROXY_PASSWORD:-}"
