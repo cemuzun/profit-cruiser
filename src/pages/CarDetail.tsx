@@ -19,7 +19,7 @@ function PriceTile({ label, value }: { label: string; value: number | null | und
   );
 }
 import { ArrowLeft, Bookmark, BookmarkCheck, Loader2 } from "lucide-react";
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { VerdictBadge } from "./Dashboard";
@@ -45,6 +45,20 @@ export default function CarDetail() {
       const { data, error } = await supabase
         .from("listings_snapshots")
         .select("scraped_at, avg_daily_price, completed_trips")
+        .eq("vehicle_id", id!)
+        .order("scraped_at", { ascending: true });
+      if (error) throw error;
+      return data ?? [];
+    },
+    enabled: !!id,
+  });
+
+  const { data: forecasts } = useQuery({
+    queryKey: ["car-forecasts", id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("price_forecasts")
+        .select("scraped_at, window_label, avg_price")
         .eq("vehicle_id", id!)
         .order("scraped_at", { ascending: true });
       if (error) throw error;
@@ -124,6 +138,20 @@ export default function CarDetail() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist", id] }),
   });
 
+  const forecastChartData = useMemo(() => {
+    const buckets = new Map<string, { day: string; ts: number; "7d"?: number; "14d"?: number; "30d"?: number }>();
+    for (const f of (forecasts ?? []) as any[]) {
+      const d = new Date(f.scraped_at);
+      const key = format(d, "yyyy-MM-dd");
+      const existing = buckets.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
+      const label = f.window_label as "7d" | "14d" | "30d";
+      const price = Number(f.avg_price);
+      if (Number.isFinite(price)) (existing as any)[label] = price;
+      buckets.set(key, existing);
+    }
+    return Array.from(buckets.values()).sort((a, b) => a.ts - b.ts);
+  }, [forecasts]);
+
   if (!car) {
     return (
       <div className="min-h-screen bg-background">
@@ -199,6 +227,40 @@ export default function CarDetail() {
                 ) : (
                   <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                     Need 2+ snapshots to show trend
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="lg:col-span-3">
+            <CardContent className="pt-4">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="font-semibold">Forward price trends</h2>
+                <p className="text-xs text-muted-foreground">
+                  How 7d / 14d / 30d forecast averages have moved across each scrape
+                </p>
+              </div>
+              <div className="h-64">
+                {forecastChartData.length > 1 ? (
+                  <ResponsiveContainer>
+                    <LineChart data={forecastChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                      <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `$${v}`} />
+                      <Tooltip
+                        contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
+                        formatter={(val: any) => (val == null ? "—" : `$${Number(val).toFixed(0)}`)}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Line type="monotone" dataKey="7d" name="Next 7d avg" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls />
+                      <Line type="monotone" dataKey="14d" name="Next 14d avg" stroke="hsl(var(--accent-foreground))" strokeWidth={2} dot={false} connectNulls />
+                      <Line type="monotone" dataKey="30d" name="Next 30d avg" stroke="hsl(var(--muted-foreground))" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
+                    Need 2+ refreshes to show forward trend
                   </div>
                 )}
               </div>
