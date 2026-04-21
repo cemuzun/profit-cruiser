@@ -164,6 +164,9 @@ export type Database = {
           longitude: number | null
           make: string | null
           model: string | null
+          price_14d_avg: number | null
+          price_30d_avg: number | null
+          price_7d_avg: number | null
           rating: number | null
           trim: string | null
           updated_at: string
@@ -188,6 +191,9 @@ export type Database = {
           longitude?: number | null
           make?: string | null
           model?: string | null
+          price_14d_avg?: number | null
+          price_30d_avg?: number | null
+          price_7d_avg?: number | null
           rating?: number | null
           trim?: string | null
           updated_at?: string
@@ -212,6 +218,9 @@ export type Database = {
           longitude?: number | null
           make?: string | null
           model?: string | null
+          price_14d_avg?: number | null
+          price_30d_avg?: number | null
+          price_7d_avg?: number | null
           rating?: number | null
           trim?: string | null
           updated_at?: string
@@ -240,6 +249,9 @@ export type Database = {
           longitude: number | null
           make: string | null
           model: string | null
+          price_14d_avg: number | null
+          price_30d_avg: number | null
+          price_7d_avg: number | null
           rating: number | null
           raw: Json | null
           scraped_at: string
@@ -266,6 +278,9 @@ export type Database = {
           longitude?: number | null
           make?: string | null
           model?: string | null
+          price_14d_avg?: number | null
+          price_30d_avg?: number | null
+          price_7d_avg?: number | null
           rating?: number | null
           raw?: Json | null
           scraped_at?: string
@@ -292,6 +307,9 @@ export type Database = {
           longitude?: number | null
           make?: string | null
           model?: string | null
+          price_14d_avg?: number | null
+          price_30d_avg?: number | null
+          price_7d_avg?: number | null
           rating?: number | null
           raw?: Json | null
           scraped_at?: string
@@ -299,6 +317,48 @@ export type Database = {
           vehicle_id?: string
           vehicle_type?: string | null
           year?: number | null
+        }
+        Relationships: []
+      }
+      price_forecasts: {
+        Row: {
+          avg_price: number | null
+          city: string
+          created_at: string
+          id: string
+          max_price: number | null
+          min_price: number | null
+          scraped_at: string
+          vehicle_id: string
+          window_end: string
+          window_label: string
+          window_start: string
+        }
+        Insert: {
+          avg_price?: number | null
+          city: string
+          created_at?: string
+          id?: string
+          max_price?: number | null
+          min_price?: number | null
+          scraped_at?: string
+          vehicle_id: string
+          window_end: string
+          window_label: string
+          window_start: string
+        }
+        Update: {
+          avg_price?: number | null
+          city?: string
+          created_at?: string
+          id?: string
+          max_price?: number | null
+          min_price?: number | null
+          scraped_at?: string
+          vehicle_id?: string
+          window_end?: string
+          window_label?: string
+          window_start?: string
         }
         Relationships: []
       }
