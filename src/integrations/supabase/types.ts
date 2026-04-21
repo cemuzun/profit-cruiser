@@ -17,6 +17,13 @@ export type Database = {
       cost_assumptions_global: {
         Row: {
           cleaning_per_trip: number
+          default_acquisition_mode: string
+          default_avg_miles_per_trip: number
+          default_lease_down: number
+          default_lease_monthly: number
+          default_lease_term_months: number
+          default_mileage_cap_monthly: number
+          default_mileage_overage_per_mi: number
           default_purchase_price: number
           depreciation_pct_annual: number
           id: number
@@ -31,6 +38,13 @@ export type Database = {
         }
         Insert: {
           cleaning_per_trip?: number
+          default_acquisition_mode?: string
+          default_avg_miles_per_trip?: number
+          default_lease_down?: number
+          default_lease_monthly?: number
+          default_lease_term_months?: number
+          default_mileage_cap_monthly?: number
+          default_mileage_overage_per_mi?: number
           default_purchase_price?: number
           depreciation_pct_annual?: number
           id?: number
@@ -45,6 +59,13 @@ export type Database = {
         }
         Update: {
           cleaning_per_trip?: number
+          default_acquisition_mode?: string
+          default_avg_miles_per_trip?: number
+          default_lease_down?: number
+          default_lease_monthly?: number
+          default_lease_term_months?: number
+          default_mileage_cap_monthly?: number
+          default_mileage_overage_per_mi?: number
           default_purchase_price?: number
           depreciation_pct_annual?: number
           id?: number
@@ -61,10 +82,17 @@ export type Database = {
       }
       cost_overrides: {
         Row: {
+          acquisition_mode: string | null
+          avg_miles_per_trip: number | null
           cleaning_per_trip: number | null
           depreciation_pct_annual: number | null
           insurance_monthly: number | null
+          lease_down: number | null
+          lease_monthly: number | null
+          lease_term_months: number | null
           maintenance_monthly: number | null
+          mileage_cap_monthly: number | null
+          mileage_overage_per_mi: number | null
           notes: string | null
           purchase_price: number | null
           registration_monthly: number | null
@@ -75,10 +103,17 @@ export type Database = {
           vehicle_id: string
         }
         Insert: {
+          acquisition_mode?: string | null
+          avg_miles_per_trip?: number | null
           cleaning_per_trip?: number | null
           depreciation_pct_annual?: number | null
           insurance_monthly?: number | null
+          lease_down?: number | null
+          lease_monthly?: number | null
+          lease_term_months?: number | null
           maintenance_monthly?: number | null
+          mileage_cap_monthly?: number | null
+          mileage_overage_per_mi?: number | null
           notes?: string | null
           purchase_price?: number | null
           registration_monthly?: number | null
@@ -89,10 +124,17 @@ export type Database = {
           vehicle_id: string
         }
         Update: {
+          acquisition_mode?: string | null
+          avg_miles_per_trip?: number | null
           cleaning_per_trip?: number | null
           depreciation_pct_annual?: number | null
           insurance_monthly?: number | null
+          lease_down?: number | null
+          lease_monthly?: number | null
+          lease_term_months?: number | null
           maintenance_monthly?: number | null
+          mileage_cap_monthly?: number | null
+          mileage_overage_per_mi?: number | null
           notes?: string | null
           purchase_price?: number | null
           registration_monthly?: number | null
