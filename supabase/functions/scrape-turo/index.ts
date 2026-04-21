@@ -11,19 +11,24 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const CITIES: Record<string, { country: string; name: string }> = {
-  "los-angeles": { country: "US", name: "Los Angeles" },
-  "miami": { country: "US", name: "Miami" },
+const CITIES: Record<string, { country: string; name: string; lat: number; lng: number; region: string; placeId: string }> = {
+  "los-angeles": {
+    country: "US",
+    name: "Los Angeles",
+    lat: 34.0549076,
+    lng: -118.242643,
+    region: "CA",
+    placeId: "ChIJE9on3F3HwoAR9AhGJW_fL-I",
+  },
+  "miami": {
+    country: "US",
+    name: "Miami",
+    lat: 25.7616798,
+    lng: -80.1917902,
+    region: "FL",
+    placeId: "ChIJEcHIDqKw2YgRZU-t3XHylv8",
+  },
 };
-
-const PRICE_SEGMENTS: Array<[number, number]> = [
-  [0, 50],
-  [50, 80],
-  [80, 120],
-  [120, 180],
-  [180, 300],
-  [300, 1000],
-];
 
 const VEHICLE_TYPES = ["CAR", "SUV", "MINIVAN", "TRUCK", "VAN"];
 
@@ -64,22 +69,26 @@ function parseProxy(): ProxyConf | null {
   }
 }
 
-function browserHeaders(pathAndQuery: string): string[] {
-  return [
-    `GET ${pathAndQuery} HTTP/1.1`,
+function buildPostRequest(pathAndQuery: string, body: string, refererUrl: string): string {
+  const bodyBytes = new TextEncoder().encode(body).length;
+  const lines = [
+    `POST ${pathAndQuery} HTTP/1.1`,
     `Host: ${TURO_HOST}`,
-    `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`,
-    `Accept: application/json, text/plain, */*`,
+    `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36`,
+    `Accept: */*`,
     `Accept-Language: en-US,en;q=0.9`,
-    `Referer: https://turo.com/us/en/search`,
+    `Content-Type: application/json`,
+    `Content-Length: ${bodyBytes}`,
+    `Referer: ${refererUrl}`,
     `Origin: https://turo.com`,
-    `X-Requested-With: XMLHttpRequest`,
     `Sec-Fetch-Dest: empty`,
     `Sec-Fetch-Mode: cors`,
     `Sec-Fetch-Site: same-origin`,
     `Connection: close`,
-    `\r\n`, // end of headers
+    ``,
+    ``,
   ];
+  return lines.join("\r\n") + body;
 }
 
 async function readUntil(reader: ReadableStreamDefaultReader<Uint8Array>, marker: string): Promise<{ head: string; rest: Uint8Array }> {
@@ -149,12 +158,10 @@ function dechunk(body: Uint8Array): Uint8Array {
   return new Uint8Array(out);
 }
 
-async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<any> {
-  // 1. Open raw TCP to proxy
+async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string, body: string, refererUrl: string): Promise<any> {
   const conn = await Deno.connect({ hostname: proxy.host, port: proxy.port });
 
   try {
-    // 2. Send CONNECT
     const auth =
       proxy.user || proxy.pass
         ? `Proxy-Authorization: Basic ${btoa(`${proxy.user ?? ""}:${proxy.pass ?? ""}`)}\r\n`
@@ -166,48 +173,38 @@ async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<an
       `\r\n`;
     await conn.write(new TextEncoder().encode(connectReq));
 
-    // 3. Read CONNECT response
     const reader = conn.readable.getReader();
     const { head: connectHead, rest: leftover } = await readUntil(reader, "\r\n\r\n");
     if (!/^HTTP\/1\.[01] 200/.test(connectHead)) {
       throw new Error(`Proxy CONNECT failed: ${connectHead.split("\r\n")[0]}`);
     }
-    if (leftover.length > 0) {
-      throw new Error("Unexpected data after CONNECT response");
-    }
+    if (leftover.length > 0) throw new Error("Unexpected data after CONNECT response");
     reader.releaseLock();
 
-    // 4. Upgrade socket to TLS
     const tls = await Deno.startTls(conn, { hostname: TURO_HOST });
 
     try {
-      // 5. Send HTTP request over TLS
-      const req = browserHeaders(pathAndQuery).join("\r\n");
+      const req = buildPostRequest(pathAndQuery, body, refererUrl);
       await tls.write(new TextEncoder().encode(req));
 
-      // 6. Read response
       const tlsReader = tls.readable.getReader();
       const { head, rest } = await readUntil(tlsReader, "\r\n\r\n");
       const bodyBytes = await readAll(tlsReader, rest);
 
-      // Parse status
       const statusLine = head.split("\r\n")[0];
       const statusMatch = statusLine.match(/HTTP\/1\.[01] (\d+)/);
       const status = statusMatch ? Number(statusMatch[1]) : 0;
 
-      // Detect chunked
       const isChunked = /transfer-encoding:\s*chunked/i.test(head);
       const finalBody = isChunked ? dechunk(bodyBytes) : bodyBytes;
 
-      // Detect gzip — most servers won't gzip if we don't send Accept-Encoding,
-      // and we don't, so we should be fine. But guard:
       if (/content-encoding:\s*(gzip|br|deflate)/i.test(head)) {
         throw new Error("Got encoded response — not supported");
       }
 
       const text = new TextDecoder().decode(finalBody);
       if (status !== 200) {
-        throw new Error(`Turo ${status}: ${text.slice(0, 200)}`);
+        throw new Error(`Turo ${status}: ${text.slice(0, 300)}`);
       }
       return JSON.parse(text);
     } finally {
@@ -219,42 +216,52 @@ async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<an
   }
 }
 
-function pickupReturnDates() {
-  const start = new Date();
-  start.setDate(start.getDate() + 7);
-  start.setHours(10, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 3);
-  return {
-    pickupDate: start.toISOString().slice(0, 10),
-    pickupTime: "10:00",
-    dropoffDate: end.toISOString().slice(0, 10),
-    dropoffTime: "10:00",
-  };
-}
-
-async function fetchSegment(proxy: ProxyConf, citySlug: string, vehicleType: string, minPrice: number, maxPrice: number) {
-  const city = CITIES[citySlug];
-  if (!city) throw new Error(`Unknown city ${citySlug}`);
-  const dates = pickupReturnDates();
-
+function buildRefererUrl(city: typeof CITIES[string]): string {
   const params = new URLSearchParams({
+    age: "30",
     country: city.country,
     defaultZoomLevel: "11",
     isMapSearch: "false",
     itemsPerPage: "200",
+    latitude: String(city.lat),
     location: city.name,
-    locationType: "City",
-    pickupTime: `${dates.pickupDate}T${dates.pickupTime}`,
-    returnTime: `${dates.dropoffDate}T${dates.dropoffTime}`,
-    region: city.country,
+    locationType: "CITY",
+    longitude: String(city.lng),
+    pickupType: "ALL",
+    placeId: city.placeId,
+    region: city.region,
+    searchDurationType: "DAILY",
     sortType: "RELEVANCE",
-    types: vehicleType,
-    minDailyPriceUSD: String(minPrice),
-    maxDailyPriceUSD: String(maxPrice),
+  });
+  return `https://turo.com/us/en/search?${params.toString()}`;
+}
+
+async function fetchSegment(proxy: ProxyConf, citySlug: string, vehicleType: string) {
+  const city = CITIES[citySlug];
+  if (!city) throw new Error(`Unknown city ${citySlug}`);
+
+  const body = JSON.stringify({
+    filters: {
+      age: 30,
+      engines: [],
+      features: [],
+      location: {
+        country: city.country,
+        type: "area",
+        point: { lat: city.lat, lng: city.lng },
+      },
+      makes: [],
+      models: [],
+      tmvTiers: [],
+      types: vehicleType ? [vehicleType] : [],
+    },
+    flexibleType: "NOT_FLEXIBLE",
+    searchDurationType: "DAILY",
+    sorts: { direction: "ASC", type: "RELEVANCE" },
   });
 
-  const data = await fetchViaProxy(proxy, `/api/v2/search?${params.toString()}`);
+  const referer = buildRefererUrl(city);
+  const data = await fetchViaProxy(proxy, "/api/v2/search", body, referer);
   const list =
     data?.searchResults ??
     data?.vehicles ??
@@ -330,8 +337,7 @@ async function runScrape(cities: string[], testMode = false) {
   );
 
   const summary: any[] = [];
-  const vts = testMode ? ["CAR"] : VEHICLE_TYPES;
-  const segs = testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
+  const vts = testMode ? [""] : ["", ...VEHICLE_TYPES];
 
   for (const citySlug of cities) {
     const { data: runRow } = await supabase
@@ -346,19 +352,18 @@ async function runScrape(cities: string[], testMode = false) {
     let errorMsg: string | null = null;
 
     for (const vt of vts) {
-      for (const [minP, maxP] of segs) {
-        try {
-          const list = await fetchSegment(proxy, citySlug, vt, minP, maxP);
-          segments++;
-          for (const raw of list) {
-            const n = normalize(raw, citySlug);
-            if (n && !seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
-          }
-          await new Promise((r) => setTimeout(r, 300));
-        } catch (e: any) {
-          errorMsg = e.message;
-          console.error(`Segment ${citySlug}/${vt}/${minP}-${maxP}:`, e.message);
+      try {
+        const list = await fetchSegment(proxy, citySlug, vt);
+        segments++;
+        console.log(`${citySlug}/${vt || "ALL"}: ${list.length} results`);
+        for (const raw of list) {
+          const n = normalize(raw, citySlug);
+          if (n && !seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
         }
+        await new Promise((r) => setTimeout(r, 500));
+      } catch (e: any) {
+        errorMsg = e.message;
+        console.error(`Segment ${citySlug}/${vt || "ALL"}:`, e.message);
       }
     }
 
