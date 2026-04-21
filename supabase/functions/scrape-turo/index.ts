@@ -32,13 +32,45 @@ function buildHeaders() {
   return {
     "User-Agent":
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://turo.com/us/en/search",
     "Origin": "https://turo.com",
     "X-Requested-With": "XMLHttpRequest",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
   };
 }
+
+// Build a Deno HTTP client routing through the user's proxy if TURO_PROXY_URL is set.
+// Supports http/https proxies with optional basic auth (http://user:pass@host:port).
+function buildProxyClient(): Deno.HttpClient | undefined {
+  const proxyUrl = Deno.env.get("TURO_PROXY_URL");
+  if (!proxyUrl) return undefined;
+  try {
+    const u = new URL(proxyUrl);
+    const basicAuth =
+      u.username || u.password
+        ? "Basic " +
+          btoa(
+            `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`,
+          )
+        : undefined;
+    // Strip credentials from URL for the proxy field
+    const cleanUrl = `${u.protocol}//${u.host}`;
+    // @ts-ignore - Deno unstable API; available in supabase edge runtime
+    return Deno.createHttpClient({
+      proxy: { url: cleanUrl, basicAuth: basicAuth ? { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) } : undefined },
+    });
+  } catch (e) {
+    console.error("Invalid TURO_PROXY_URL:", (e as Error).message);
+    return undefined;
+  }
+}
+
+let PROXY_CLIENT: Deno.HttpClient | undefined;
 
 function pickupReturnDates() {
   const start = new Date();
@@ -77,7 +109,11 @@ async function fetchSegment(citySlug: string, vehicleType: string, minPrice: num
   });
 
   const url = `${TURO_SEARCH_URL}?${params.toString()}`;
-  const res = await fetch(url, { headers: buildHeaders() });
+  const fetchOpts: RequestInit & { client?: Deno.HttpClient } = {
+    headers: buildHeaders(),
+  };
+  if (PROXY_CLIENT) fetchOpts.client = PROXY_CLIENT;
+  const res = await fetch(url, fetchOpts);
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`Turo ${res.status}: ${txt.slice(0, 200)}`);
@@ -148,19 +184,14 @@ function normalize(raw: any, citySlug: string) {
   };
 }
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-
+async function runScrape(cities: string[]) {
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  let body: any = {};
-  try {
-    body = await req.json();
-  } catch (_) {}
-  const cities: string[] = body.cities ?? ["los-angeles", "miami"];
+  PROXY_CLIENT = buildProxyClient();
+  console.log("Proxy configured:", PROXY_CLIENT ? "yes" : "no");
 
   const summary: any[] = [];
 
