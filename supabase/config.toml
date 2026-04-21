@@ -1,0 +1,4 @@
+project_id = "cxvcyhlkybtooxmhzqej"
+
+[functions.scrape-turo]
+verify_jwt = false
