@@ -1,74 +1,70 @@
 
-# Turo Profitability Analyzer — LA & Miami
 
-A data-driven tool to find the most profitable cars to list on Turo, and to score any specific car you're considering buying.
+# Seasonality Analysis + Compare Cars
 
-## How it works
+Two additions that build directly on the snapshot history we already collect.
 
-**Daily scrape (background job)**
-- Scheduled Supabase Edge Function runs once a day for Los Angeles and Miami.
-- Calls Turo's internal search endpoint directly via `fetch` (deep scan: multiple price/vehicle-type segments per city to gather a broad set of listings, ~1000/city/day).
-- Stores each listing snapshot in the database with timestamp so we build historical trends over time.
-- Manual "Refresh now" button on the dashboard to trigger an on-demand scrape.
+## 1. Seasonality analysis
 
-**Note on direct fetch:** Turo can change their internal API or block requests at any time. If/when that happens, we'll need to swap to a scraping service. We'll log failures clearly so you'll know when a scrape breaks.
+**Goal:** see how Turo daily prices move by month and by weekday, so utilization/revenue assumptions in the analyzer aren't just a flat 60%.
 
-**Profitability model (simple & transparent)**
-- Monthly revenue = `avgDailyPrice × 30 × utilization%` (default 60%, adjustable globally and per-car).
-- Monthly profit = Monthly revenue − Monthly operating cost.
-- ROI shown as profit margin % and payback months.
+**Where it lives:**
+- New page `/seasonality` (added to top nav as "Seasonality")
+- Plus a compact "Seasonality" card on the **Car Detail** page for that specific vehicle
 
-**Operating cost (hybrid)**
-- Smart defaults estimated from year/make/model/city: depreciation, insurance, maintenance, cleaning, Turo platform fee (25% default), tires, registration.
-- Every line item is editable per car or globally in Settings.
+**What you'll see on `/seasonality`:**
+- City filter (LA / Miami / both) and optional Make+Model filter
+- **Monthly chart** — bar chart of median daily price for each calendar month (Jan–Dec), with P25/P75 band
+- **Weekday chart** — bar chart of median daily price Mon–Sun, with weekend uplift % shown as a stat
+- **Seasonality multipliers table** — each month and weekday shown as a multiplier vs. annual median (e.g. "July = 1.18×, Tuesday = 0.92×"). These are the numbers you'd plug into utilization estimates.
+- KPI strip: peak month, low month, weekend premium %, sample size (snapshots used)
 
-## Screens
+**On Car Detail:**
+- Small "Seasonality" card with the monthly multiplier mini-chart for just that vehicle (falls back to its make/model if it has too few own snapshots, then to city-wide).
 
-1. **Market Dashboard** (home)
-   - City toggle: Los Angeles / Miami / Both
-   - KPI strip: total listings tracked, avg daily price, avg estimated monthly profit, top performer
-   - Sortable/filterable table of cars ranked by estimated monthly profit
-   - Filters: make, model, year, vehicle type, fuel type, price range, min trips, min rating, All-Star host
-   - Charts: avg daily price trend (last 30/90 days), profit distribution by make, supply trend per segment
-   - Click a row → Car Detail
+**Data source:** existing `listings_snapshots` table — we already store `avg_daily_price` + `scraped_at` daily, so we group by `EXTRACT(MONTH …)` and `EXTRACT(DOW …)`. No new scraping needed. Quality note: until we have ~30+ days of history, the page will show a "Limited data — collecting since {date}" banner; results get more meaningful with each daily run.
 
-2. **Car Detail**
-   - Full listing info, host stats, image, location
-   - Price & utilization history chart (from snapshots)
-   - Editable cost breakdown with live profit recalculation
-   - "Save to watchlist" button
+**Wiring into the rest of the app:**
+- Analyzer + Car Detail get a new optional toggle: **"Apply seasonality"** → when on, instead of one flat utilization number, projected monthly revenue is multiplied by that month's seasonality factor and the chart shows 12 monthly profit bars instead of one.
 
-3. **Car Analyzer** (the "should I buy this?" tool)
-   - Form: make, model, year, city, purchase price, expected utilization
-   - Auto-pulls comparable listings from our DB to suggest realistic daily price (median, p25, p75 of similar cars in that city)
-   - Output: estimated monthly revenue, total monthly costs (with breakdown), monthly profit, margin %, payback months, verdict badge (Excellent / Good / Marginal / Avoid)
-   - Comparison table vs. top 5 similar listings currently on Turo
+## 2. Compare cars page
 
-4. **Watchlist**
-   - Saved cars from Dashboard or Detail
-   - Side-by-side comparison view (revenue, costs, profit, trend sparkline)
-   - Alert badge if price drops or new comparable listing beats it
+**Goal:** pick 2–4 watchlist vehicles and judge them head-to-head.
 
-5. **Settings**
-   - Global defaults: utilization %, Turo fee %, insurance/month, maintenance/1000mi, cleaning/trip, depreciation %, etc.
-   - Cities tracked (LA, Miami; expandable later)
-   - Scrape schedule status + last run log
+**Where it lives:** new page `/compare`, added to top nav as "Compare". Also a "Compare selected" button appears on `/watchlist` once you tick 2+ rows (watchlist gets row checkboxes).
 
-## Data model (high level)
-- `listings_snapshots` — every scraped row with `scraped_at` (history)
-- `listings_current` — latest snapshot per Turo vehicle ID (fast dashboard reads)
-- `cost_assumptions` — global defaults + per-car overrides
-- `watchlist` — saved vehicle IDs
-- `scrape_runs` — job log (city, count, status, errors)
+**Layout:** side-by-side columns (one per car, up to 4), responsive — stacks on mobile.
 
-## Tech
-- Lovable Cloud (Supabase) for DB + Edge Functions + scheduled cron
-- Single-user mode (no login) — all data shared
-- React + Tailwind + shadcn/ui, Recharts for charts
-- TanStack Query for data fetching
+**Each column shows:**
+- Header: image, year + make + model, city, verdict badge (Excellent / Good / Marginal / Avoid)
+- **Key stats** (rows aligned across columns so your eye can scan):
+  - Avg daily price
+  - Assumed utilization
+  - Monthly gross revenue
+  - Turo fee
+  - Total monthly costs
+  - **Monthly profit** (highlighted, color-coded)
+  - Margin %
+  - Payback months
+  - Purchase price (override or estimate)
+- **Price trend sparkline** (last 30 days from `listings_snapshots`)
+- **Cost breakdown mini bar** (insurance / maintenance / cleaning / depreciation / registration / tires)
 
-## Out of scope for v1
-- User accounts / multi-tenant
-- Real Turo booking calendar / live availability beyond snapshot
-- Other cities (easy to add later by parameter)
-- Email/push alerts (badge alerts only in v1)
+**Top of page:**
+- Car picker chips — choose which 2–4 watchlist cars to show (defaults to first 3)
+- "Winner" callout — highlights the car with highest monthly profit and shortest payback
+- Toggle: "Use seasonality-adjusted revenue" (ties into feature #1)
+
+**Empty state:** if watchlist has < 2 cars, show a CTA pointing to the dashboard to bookmark some.
+
+## Technical notes (for reference)
+
+- New file `src/lib/seasonality.ts` — pure functions: `computeMonthlyMultipliers(snapshots)`, `computeWeekdayMultipliers(snapshots)`, `applySeasonality(profit, month, multiplier)`.
+- New hook `src/hooks/useSeasonality.ts` — TanStack Query, params `{ city?, make?, model?, vehicle_id? }`, fetches from `listings_snapshots` (cap last 365 days, limit 5000 rows). Falls back: vehicle → make+model → city → all.
+- New pages: `src/pages/Seasonality.tsx`, `src/pages/Compare.tsx`.
+- Routes added in `src/App.tsx`; nav links added in `src/components/AppNav.tsx` (Seasonality + Compare icons).
+- Watchlist (`src/pages/Watchlist.tsx`) gets row checkboxes + "Compare selected (n)" button → navigates to `/compare?ids=…`.
+- Charts: reuse Recharts (already in project) — `BarChart` for seasonality, small inline `LineChart` for sparklines on Compare.
+- All computations run client-side from snapshots; no schema changes, no new edge functions, no new secrets.
+- Independent of the scraper-fix discussion — works on whatever snapshot data we have (sample or real once scraping is fixed).
+
