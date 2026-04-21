@@ -479,15 +479,23 @@ async function dumpJson() {
   console.log("Dumped:", meta);
 }
 
+// ---------- Browser launcher (shared with test-scrape.mjs) ----------
+export async function launchBrowser() {
+  return await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-dev-shm-usage", "--ignore-certificate-errors"],
+    ...(PROXY ? { proxy: PROXY } : {}),
+  });
+}
+
+export { scrapeCity, scrapeSegment, CITIES, WINDOWS, PRICE_SEGMENTS, VEHICLE_TYPES, pool };
+
 // ---------- Main ----------
 async function main() {
   const cities = process.argv.slice(2).filter(Boolean);
   const targets = cities.length ? cities : Object.keys(CITIES);
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"],
-  });
+  const browser = await launchBrowser();
 
   try {
     for (const c of targets) {
@@ -501,4 +509,9 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+// Only run main when invoked directly (not when imported by test-scrape.mjs).
+const isMain = import.meta.url === `file://${process.argv[1]}`;
+if (isMain) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}
+
