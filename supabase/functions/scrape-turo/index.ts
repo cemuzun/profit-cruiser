@@ -301,7 +301,7 @@ Deno.serve(async (req) => {
 
   if (testMode) {
     try {
-      const result = await runScrape(cities);
+      const result = await runScrape(cities, { testMode: true });
       return new Response(
         JSON.stringify({ ok: true, test: true, result }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -314,15 +314,15 @@ Deno.serve(async (req) => {
     }
   }
 
-  // @ts-ignore - EdgeRuntime is provided by supabase edge runtime
+  // @ts-ignore - EdgeRuntime
   EdgeRuntime.waitUntil(
-    runScrape(cities).catch((e) => console.error("Scrape failed:", e)),
+    runScrape(cities, { testMode: false }).catch((e) => console.error("Scrape failed:", e)),
   );
 
   return new Response(
     JSON.stringify({
       ok: true,
-      message: `Scrape started for ${cities.join(", ")} via Firecrawl. Check back in 1-2 minutes.`,
+      message: `Full scrape started for ${cities.join(", ")} (${PRICE_SEGMENTS.length} price bands × ${VEHICLE_TYPES.length} vehicle types per city). Check back in 5-10 minutes.`,
       cities,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
