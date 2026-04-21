@@ -110,14 +110,20 @@ const VEHICLE_SCHEMA = {
   required: ["vehicles"],
 };
 
-async function scrapeCity(citySlug: string) {
+async function scrapeSegment(
+  citySlug: string,
+  minPrice: number,
+  maxPrice: number,
+  vehicleType: string | null,
+) {
   const apiKey = Deno.env.get("FIRECRAWL_API_KEY");
   if (!apiKey) throw new Error("FIRECRAWL_API_KEY is not configured");
   const city = CITIES[citySlug];
   if (!city) throw new Error(`Unknown city ${citySlug}`);
 
-  const url = buildSearchUrl(city);
-  console.log(`Firecrawl scrape: ${url}`);
+  const url = buildSearchUrl(city, minPrice, maxPrice, vehicleType);
+  const label = `${citySlug}/${vehicleType ?? "ALL"}/$${minPrice}-${maxPrice}`;
+  console.log(`Firecrawl scrape: ${label}`);
 
   const res = await fetch(`${FIRECRAWL_V2}/scrape`, {
     method: "POST",
@@ -132,23 +138,23 @@ async function scrapeCity(citySlug: string) {
           type: "json",
           schema: VEHICLE_SCHEMA,
           prompt:
-            "Extract every car listing visible on this Turo search results page. Return one entry per vehicle with the daily price in USD, make, model, year, trip count, host rating, and absolute listing URL.",
+            "Extract EVERY car listing visible on this Turo search results page — do not skip any. For each vehicle return: vehicle_id (numeric ID from listing URL), make, model, year, daily price in USD, completed trips count, host rating, host name, image URL, and the absolute listing URL.",
         },
       ],
       onlyMainContent: false,
-      waitFor: 4000,
+      waitFor: 5000,
       location: { country: "US", languages: ["en-US"] },
     }),
   });
 
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(`Firecrawl ${res.status}: ${JSON.stringify(data).slice(0, 400)}`);
+    throw new Error(`Firecrawl ${res.status} (${label}): ${JSON.stringify(data).slice(0, 300)}`);
   }
 
-  // Firecrawl v2 returns { success, data: { json: {...}, metadata: {...} } }
   const json = data?.data?.json ?? data?.json ?? {};
   const vehicles = Array.isArray(json?.vehicles) ? json.vehicles : [];
+  console.log(`  ${label}: ${vehicles.length} vehicles`);
   return vehicles;
 }
 
