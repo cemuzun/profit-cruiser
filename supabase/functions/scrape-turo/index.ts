@@ -34,7 +34,27 @@ const CITIES: Record<
   },
 };
 
-function buildSearchUrl(city: typeof CITIES[string]): string {
+// Price segments cover the full Turo range; narrow segments give better extraction recall
+// since Firecrawl's JSON extractor sees more of the listings on each page.
+const PRICE_SEGMENTS: Array<[number, number]> = [
+  [0, 40],
+  [40, 60],
+  [60, 80],
+  [80, 110],
+  [110, 150],
+  [150, 220],
+  [220, 350],
+  [350, 1000],
+];
+
+const VEHICLE_TYPES: Array<string | null> = [null, "CAR", "SUV", "MINIVAN", "TRUCK", "VAN"];
+
+function buildSearchUrl(
+  city: typeof CITIES[string],
+  minPrice?: number,
+  maxPrice?: number,
+  vehicleType?: string | null,
+): string {
   const params = new URLSearchParams({
     age: "30",
     country: city.country,
@@ -51,6 +71,9 @@ function buildSearchUrl(city: typeof CITIES[string]): string {
     searchDurationType: "DAILY",
     sortType: "RELEVANCE",
   });
+  if (minPrice !== undefined) params.set("minDailyPriceUSD", String(minPrice));
+  if (maxPrice !== undefined) params.set("maxDailyPriceUSD", String(maxPrice));
+  if (vehicleType) params.set("types", vehicleType);
   return `https://turo.com/us/en/search?${params.toString()}`;
 }
 
@@ -87,14 +110,20 @@ const VEHICLE_SCHEMA = {
   required: ["vehicles"],
 };
 
-async function scrapeCity(citySlug: string) {
+async function scrapeSegment(
+  citySlug: string,
+  minPrice: number,
+  maxPrice: number,
+  vehicleType: string | null,
+) {
   const apiKey = Deno.env.get("FIRECRAWL_API_KEY");
   if (!apiKey) throw new Error("FIRECRAWL_API_KEY is not configured");
   const city = CITIES[citySlug];
   if (!city) throw new Error(`Unknown city ${citySlug}`);
 
-  const url = buildSearchUrl(city);
-  console.log(`Firecrawl scrape: ${url}`);
+  const url = buildSearchUrl(city, minPrice, maxPrice, vehicleType);
+  const label = `${citySlug}/${vehicleType ?? "ALL"}/$${minPrice}-${maxPrice}`;
+  console.log(`Firecrawl scrape: ${label}`);
 
   const res = await fetch(`${FIRECRAWL_V2}/scrape`, {
     method: "POST",
@@ -109,23 +138,23 @@ async function scrapeCity(citySlug: string) {
           type: "json",
           schema: VEHICLE_SCHEMA,
           prompt:
-            "Extract every car listing visible on this Turo search results page. Return one entry per vehicle with the daily price in USD, make, model, year, trip count, host rating, and absolute listing URL.",
+            "Extract EVERY car listing visible on this Turo search results page — do not skip any. For each vehicle return: vehicle_id (numeric ID from listing URL), make, model, year, daily price in USD, completed trips count, host rating, host name, image URL, and the absolute listing URL.",
         },
       ],
       onlyMainContent: false,
-      waitFor: 4000,
+      waitFor: 5000,
       location: { country: "US", languages: ["en-US"] },
     }),
   });
 
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(`Firecrawl ${res.status}: ${JSON.stringify(data).slice(0, 400)}`);
+    throw new Error(`Firecrawl ${res.status} (${label}): ${JSON.stringify(data).slice(0, 300)}`);
   }
 
-  // Firecrawl v2 returns { success, data: { json: {...}, metadata: {...} } }
   const json = data?.data?.json ?? data?.json ?? {};
   const vehicles = Array.isArray(json?.vehicles) ? json.vehicles : [];
+  console.log(`  ${label}: ${vehicles.length} vehicles`);
   return vehicles;
 }
 
@@ -167,13 +196,27 @@ function normalize(raw: any, citySlug: string) {
   };
 }
 
-async function runScrape(cities: string[]) {
+// Concurrency limiter — Firecrawl has rate limits, keep parallel calls modest.
+async function pAll<T>(tasks: Array<() => Promise<T>>, concurrency: number): Promise<void> {
+  let idx = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (idx < tasks.length) {
+      const i = idx++;
+      try { await tasks[i](); } catch (_) { /* per-task already handled */ }
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function runScrape(cities: string[], opts: { testMode?: boolean } = {}) {
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
   const summary: any[] = [];
+  const segs = opts.testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
+  const types = opts.testMode ? [null] : VEHICLE_TYPES;
 
   for (const citySlug of cities) {
     const { data: runRow } = await supabase
@@ -184,21 +227,33 @@ async function runScrape(cities: string[]) {
     const runId = runRow?.id;
 
     const seen = new Map<string, any>();
-    let errorMsg: string | null = null;
+    const errors: string[] = [];
+    let segmentsOk = 0;
 
-    try {
-      const list = await scrapeCity(citySlug);
-      console.log(`${citySlug}: ${list.length} vehicles extracted`);
-      for (const raw of list) {
-        const n = normalize(raw, citySlug);
-        if (!seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
+    const tasks: Array<() => Promise<void>> = [];
+    for (const [minP, maxP] of segs) {
+      for (const vt of types) {
+        tasks.push(async () => {
+          try {
+            const list = await scrapeSegment(citySlug, minP, maxP, vt);
+            segmentsOk++;
+            for (const raw of list) {
+              const n = normalize(raw, citySlug);
+              if (!seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
+            }
+          } catch (e: any) {
+            errors.push(e.message);
+            console.error("Segment failed:", e.message);
+          }
+        });
       }
-    } catch (e: any) {
-      errorMsg = e.message;
-      console.error(`Scrape ${citySlug} failed:`, e.message);
     }
 
+    await pAll(tasks, 3);
+
     const rows = Array.from(seen.values());
+    console.log(`${citySlug}: ${rows.length} unique vehicles across ${segmentsOk}/${tasks.length} segments`);
+
     if (rows.length > 0) {
       const chunkSize = 200;
       for (let i = 0; i < rows.length; i += chunkSize) {
@@ -217,18 +272,19 @@ async function runScrape(cities: string[]) {
       }
     }
 
+    const errorMsg = errors.length > 0 ? errors.slice(0, 3).join(" | ") : null;
     await supabase
       .from("scrape_runs")
       .update({
         status: rows.length > 0 ? "success" : (errorMsg ? "failed" : "empty"),
         vehicles_count: rows.length,
-        segments_run: 1,
+        segments_run: segmentsOk,
         error_message: errorMsg,
         finished_at: new Date().toISOString(),
       })
       .eq("id", runId);
 
-    summary.push({ city: citySlug, count: rows.length, error: errorMsg });
+    summary.push({ city: citySlug, count: rows.length, segments: `${segmentsOk}/${tasks.length}`, error: errorMsg });
   }
 
   console.log("Scrape summary:", JSON.stringify(summary));
@@ -245,7 +301,7 @@ Deno.serve(async (req) => {
 
   if (testMode) {
     try {
-      const result = await runScrape(cities);
+      const result = await runScrape(cities, { testMode: true });
       return new Response(
         JSON.stringify({ ok: true, test: true, result }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
@@ -258,15 +314,15 @@ Deno.serve(async (req) => {
     }
   }
 
-  // @ts-ignore - EdgeRuntime is provided by supabase edge runtime
+  // @ts-ignore - EdgeRuntime
   EdgeRuntime.waitUntil(
-    runScrape(cities).catch((e) => console.error("Scrape failed:", e)),
+    runScrape(cities, { testMode: false }).catch((e) => console.error("Scrape failed:", e)),
   );
 
   return new Response(
     JSON.stringify({
       ok: true,
-      message: `Scrape started for ${cities.join(", ")} via Firecrawl. Check back in 1-2 minutes.`,
+      message: `Full scrape started for ${cities.join(", ")} (${PRICE_SEGMENTS.length} price bands × ${VEHICLE_TYPES.length} vehicle types per city). Check back in 5-10 minutes.`,
       cities,
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } },
