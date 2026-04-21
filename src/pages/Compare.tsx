@@ -1,16 +1,15 @@
 import { useMemo, useState, useEffect } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
+import { ds, userStore } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
 import { VerdictBadge } from "./Dashboard";
 import {
-  ResponsiveContainer, LineChart, Line, BarChart, Bar, Tooltip, XAxis, YAxis,
+  ResponsiveContainer, LineChart, Line, BarChart, Bar, Tooltip, XAxis,
 } from "recharts";
 import { Trophy, Bookmark, X } from "lucide-react";
 import { format } from "date-fns";
@@ -32,11 +31,11 @@ export default function Compare() {
   const { data: watchlistCars } = useQuery({
     queryKey: ["watchlist-compare-pool"],
     queryFn: async () => {
-      const { data: w } = await supabase.from("watchlist").select("vehicle_id, added_at").order("added_at", { ascending: false });
-      if (!w?.length) return [];
-      const ids = w.map((x) => x.vehicle_id);
-      const { data: cars } = await supabase.from("listings_current").select("*").in("vehicle_id", ids);
-      return cars ?? [];
+      const w = userStore.getWatchlist();
+      if (!w.length) return [];
+      const all = await ds.listings();
+      const ids = new Set(w.map(x => x.vehicle_id));
+      return all.filter(l => ids.has(l.vehicle_id));
     },
   });
 
@@ -57,16 +56,12 @@ export default function Compare() {
     queryKey: ["compare-snapshots", selected.join(",")],
     enabled: selected.length > 0,
     queryFn: async () => {
-      const since = new Date();
-      since.setDate(since.getDate() - 30);
-      const { data, error } = await supabase
-        .from("listings_snapshots")
-        .select("vehicle_id, scraped_at, avg_daily_price")
-        .in("vehicle_id", selected)
-        .gte("scraped_at", since.toISOString())
-        .order("scraped_at", { ascending: true });
-      if (error) throw error;
-      return data ?? [];
+      const all = await ds.snapshots();
+      const since = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const set = new Set(selected);
+      return all
+        .filter(s => set.has(s.vehicle_id) && new Date(s.scraped_at).getTime() >= since)
+        .sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
     },
   });
 

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { ds, userStore } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,18 +22,20 @@ export default function Watchlist() {
   const { data: items } = useQuery({
     queryKey: ["watchlist-full"],
     queryFn: async () => {
-      const { data: w } = await supabase.from("watchlist").select("vehicle_id, added_at").order("added_at", { ascending: false });
-      if (!w?.length) return [];
-      const ids = w.map((x) => x.vehicle_id);
-      const { data: cars } = await supabase.from("listings_current").select("*").in("vehicle_id", ids);
-      return (cars ?? []).map((c: any) => ({ ...c, added_at: w.find((x) => x.vehicle_id === c.vehicle_id)?.added_at }));
+      const w = userStore.getWatchlist();
+      if (!w.length) return [];
+      const all = await ds.listings();
+      return w
+        .map((entry) => {
+          const car = all.find((l) => l.vehicle_id === entry.vehicle_id);
+          return car ? { ...car, added_at: entry.added_at } : null;
+        })
+        .filter(Boolean) as Array<any>;
     },
   });
 
   const remove = useMutation({
-    mutationFn: async (id: string) => {
-      await supabase.from("watchlist").delete().eq("vehicle_id", id);
-    },
+    mutationFn: async (id: string) => { userStore.removeWatch(id); },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist-full"] }),
   });
 

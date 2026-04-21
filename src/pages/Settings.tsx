@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { supabase } from "@/integrations/supabase/client";
+import { ds, userStore } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -22,25 +22,16 @@ export default function Settings() {
   useEffect(() => { if (data) setForm(data); }, [data]);
 
   const save = useMutation({
-    mutationFn: async () => {
-      const { error } = await supabase
-        .from("cost_assumptions_global")
-        .update({ ...form, updated_at: new Date().toISOString() })
-        .eq("id", 1);
-      if (error) throw error;
-    },
+    mutationFn: async () => { userStore.setGlobal(form); },
     onSuccess: () => {
-      toast.success("Settings saved");
+      toast.success("Settings saved (browser-local)");
       qc.invalidateQueries({ queryKey: ["global-costs"] });
     },
   });
 
   const { data: runs } = useQuery({
     queryKey: ["scrape-runs"],
-    queryFn: async () => {
-      const { data } = await supabase.from("scrape_runs").select("*").order("started_at", { ascending: false }).limit(20);
-      return data ?? [];
-    },
+    queryFn: async () => ds.runs(),
   });
 
   const set = (k: keyof GlobalCosts) => (e: any) => setForm({ ...form, [k]: Number(e.target.value) });
@@ -55,7 +46,7 @@ export default function Settings() {
         <Card>
           <CardContent className="pt-4 space-y-3">
             <h2 className="font-semibold">Global cost assumptions</h2>
-            <p className="text-xs text-muted-foreground">These defaults apply to every car unless overridden on the car detail page.</p>
+            <p className="text-xs text-muted-foreground">Stored in your browser (localStorage). Apply to every car unless overridden on the car detail page.</p>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Field label="Utilization %" value={form.utilization_pct} onChange={set("utilization_pct")} />
               <Field label="Turo platform fee %" value={form.turo_fee_pct} onChange={set("turo_fee_pct")} />
@@ -110,7 +101,7 @@ export default function Settings() {
         <Card>
           <CardContent className="pt-4 space-y-3">
             <h2 className="font-semibold">Scrape runs</h2>
-            <p className="text-xs text-muted-foreground">Daily auto-scrape runs at 9:00 UTC. Use "Refresh now" on the dashboard to trigger manually.</p>
+            <p className="text-xs text-muted-foreground">VPS scraper runs at 08:00 and 20:00 UTC. Latest 50 runs published with each refresh.</p>
             <div className="space-y-1.5">
               {runs?.length ? runs.map((r: any) => (
                 <div key={r.id} className="flex items-center justify-between text-sm border border-border rounded-md px-3 py-2">
@@ -124,7 +115,7 @@ export default function Settings() {
                     {r.error_message && <span className="text-destructive ml-2">{r.error_message.slice(0, 60)}</span>}
                   </div>
                 </div>
-              )) : <p className="text-sm text-muted-foreground">No scrape runs yet.</p>}
+              )) : <p className="text-sm text-muted-foreground">No scrape runs yet — waiting for first VPS run.</p>}
             </div>
           </CardContent>
         </Card>
