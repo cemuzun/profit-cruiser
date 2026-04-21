@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { supabase } from "@/integrations/supabase/client";
+import { ds, type Listing } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -14,33 +14,12 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
-// Server-side Firecrawl scraper handles all segments and bypasses Cloudflare.
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
-import { Loader2, RefreshCw, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
-import { toast } from "sonner";
+import { Loader2, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
 } from "recharts";
 import { format } from "date-fns";
-
-type Listing = {
-  vehicle_id: string;
-  city: string;
-  make: string | null;
-  model: string | null;
-  year: number | null;
-  vehicle_type: string | null;
-  fuel_type: string | null;
-  avg_daily_price: number | null;
-  price_7d_avg: number | null;
-  price_14d_avg: number | null;
-  price_30d_avg: number | null;
-  completed_trips: number | null;
-  rating: number | null;
-  is_all_star_host: boolean | null;
-  image_url: string | null;
-  last_scraped_at: string;
-};
 
 const CITY_OPTIONS = [
   { value: "all", label: "All cities" },
@@ -50,7 +29,6 @@ const CITY_OPTIONS = [
 ];
 
 export default function Dashboard() {
-  const qc = useQueryClient();
   const [city, setCity] = useState("all");
   const [search, setSearch] = useState("");
   const [fuelType, setFuelType] = useState("all");
@@ -59,76 +37,41 @@ export default function Dashboard() {
   const { data: globalCosts } = useGlobalCosts();
 
   const { data: listings, isLoading } = useQuery({
-    queryKey: ["listings-current", city],
-    queryFn: async () => {
-      let q = supabase.from("listings_current").select("*").limit(2000);
-      if (city !== "all") q = q.eq("city", city);
-      const { data, error } = await q;
-      if (error) throw error;
-      return (data ?? []) as Listing[];
-    },
+    queryKey: ["listings-current"],
+    queryFn: async () => ds.listings(),
   });
 
   const { data: priceHistory } = useQuery({
     queryKey: ["price-history", city],
     queryFn: async () => {
-      const since = new Date();
-      since.setDate(since.getDate() - 30);
-      let q = supabase
-        .from("listings_snapshots")
-        .select("scraped_at, avg_daily_price, city")
-        .gte("scraped_at", since.toISOString());
-      if (city !== "all") q = q.eq("city", city);
-      const { data, error } = await q.limit(10000);
-      if (error) throw error;
+      const snaps = await ds.snapshots();
+      const since = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const filtered = snaps.filter(s => {
+        if (new Date(s.scraped_at).getTime() < since) return false;
+        if (city !== "all" && s.city !== city) return false;
+        return true;
+      });
       const buckets = new Map<string, { sum: number; n: number }>();
-      for (const r of data ?? []) {
-        const day = (r.scraped_at as string).slice(0, 10);
+      for (const r of filtered) {
+        const day = r.scraped_at.slice(0, 10);
         const b = buckets.get(day) ?? { sum: 0, n: 0 };
         b.sum += Number(r.avg_daily_price) || 0;
         b.n += 1;
         buckets.set(day, b);
       }
-      return Array.from(buckets.entries())
-        .sort()
+      return Array.from(buckets.entries()).sort()
         .map(([day, b]) => ({ day, avgPrice: b.n ? b.sum / b.n : 0 }));
     },
   });
 
-  
-
-  const refresh = useMutation({
-    mutationFn: async () => {
-      const cities = city === "all" ? ["los-angeles", "miami", "honolulu"] : [city];
-      const toastId = toast.loading(
-        `Starting full scrape for ${cities.join(", ")} — this runs in the background and takes 5–10 minutes for ALL cars.`,
-      );
-      const { data, error } = await supabase.functions.invoke("scrape-turo", {
-        body: { cities },
-      });
-      if (error) throw error;
-      toast.success(
-        data?.message ?? `Scrape started for ${cities.join(", ")}. Refresh the page in a few minutes.`,
-        { id: toastId, duration: 8000 },
-      );
-      return data;
-    },
-    onSuccess: () => {
-      // Poll for fresh data after the background job has had time to write rows.
-      setTimeout(() => {
-        qc.invalidateQueries({ queryKey: ["listings-current"] });
-        qc.invalidateQueries({ queryKey: ["price-history"] });
-        qc.invalidateQueries({ queryKey: ["scrape-runs"] });
-      }, 15000);
-    },
-    onError: (e: any) => {
-      toast.error(`Scrape failed to start: ${e.message}`);
-    },
-  });
+  const cityListings = useMemo<Listing[]>(() => {
+    if (!listings) return [];
+    return city === "all" ? listings : listings.filter(l => l.city === city);
+  }, [listings, city]);
 
   const enriched = useMemo(() => {
-    if (!listings || !globalCosts) return [];
-    const filtered = listings.filter((l) => {
+    if (!cityListings.length || !globalCosts) return [];
+    const filtered = cityListings.filter((l) => {
       if (search) {
         const q = search.toLowerCase();
         const blob = `${l.make ?? ""} ${l.model ?? ""} ${l.year ?? ""}`.toLowerCase();
@@ -139,7 +82,7 @@ export default function Dashboard() {
     });
     const withProfit = filtered.map((l) => ({
       ...l,
-      profit: computeProfit(l, globalCosts),
+      profit: computeProfit(l as any, globalCosts),
     }));
     withProfit.sort((a, b) => {
       if (sortBy === "profit") return b.profit.monthlyProfit - a.profit.monthlyProfit;
@@ -148,7 +91,7 @@ export default function Dashboard() {
       return (b.rating ?? 0) - (a.rating ?? 0);
     });
     return withProfit;
-  }, [listings, globalCosts, search, fuelType, sortBy]);
+  }, [cityListings, globalCosts, search, fuelType, sortBy]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
@@ -182,7 +125,7 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold">Market Dashboard</h1>
             <p className="text-sm text-muted-foreground">
-              Most profitable Turo cars in LA, Miami & Honolulu, ranked by estimated monthly profit.
+              Most profitable Turo cars in LA, Miami & Honolulu, ranked by estimated monthly profit. Data refreshed every 12h by the VPS scraper.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -192,17 +135,8 @@ export default function Dashboard() {
                 {CITY_OPTIONS.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Button onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-              {refresh.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              Refresh now
-            </Button>
           </div>
         </div>
-        {refresh.isPending && (
-          <div className="text-xs text-muted-foreground">
-            Full scrape running in the background — all price bands × vehicle types. New cars will appear in 5–10 minutes.
-          </div>
-        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi icon={CarIcon} label="Listings tracked" value={kpis?.count ?? 0} />
@@ -232,7 +166,7 @@ export default function Dashboard() {
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
-                  <EmptyChart label="No price history yet — run a scrape" />
+                  <EmptyChart label="No price history yet — waiting for first scrape" />
                 )}
               </div>
             </CardContent>
@@ -296,11 +230,7 @@ export default function Dashboard() {
               <div className="py-12 text-center text-muted-foreground"><Loader2 className="h-5 w-5 animate-spin inline" /></div>
             ) : enriched.length === 0 ? (
               <div className="py-16 text-center space-y-3">
-                <p className="text-muted-foreground">No listings yet. Run a scrape to get started.</p>
-                <Button onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-                  {refresh.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                  Scrape now
-                </Button>
+                <p className="text-muted-foreground">No listings yet. The VPS scraper publishes data every 12 h (08:00 & 20:00 UTC).</p>
               </div>
             ) : (
               <div className="rounded-md border overflow-x-auto">
