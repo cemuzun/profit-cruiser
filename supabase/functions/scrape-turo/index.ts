@@ -33,10 +33,25 @@ const TURO_PORT = 443;
 type ProxyConf = { host: string; port: number; user?: string; pass?: string };
 
 function parseProxy(): ProxyConf | null {
-  const url = Deno.env.get("TURO_PROXY_URL");
-  if (!url) return null;
+  const raw = Deno.env.get("TURO_PROXY_URL");
+  if (!raw) return null;
+  const val = raw.trim();
+
+  // Accept ARN-style "host:port:user:pass" format
+  if (!val.includes("://")) {
+    const parts = val.split(":");
+    if (parts.length === 4) {
+      return { host: parts[0], port: Number(parts[1]) || 80, user: parts[2], pass: parts[3] };
+    }
+    if (parts.length === 2) {
+      return { host: parts[0], port: Number(parts[1]) || 80 };
+    }
+    console.error("Bad TURO_PROXY_URL: expected host:port:user:pass or URL");
+    return null;
+  }
+
   try {
-    const u = new URL(url);
+    const u = new URL(val);
     return {
       host: u.hostname,
       port: Number(u.port) || 80,
