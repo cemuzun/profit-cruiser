@@ -337,8 +337,7 @@ async function runScrape(cities: string[], testMode = false) {
   );
 
   const summary: any[] = [];
-  const vts = testMode ? ["CAR"] : VEHICLE_TYPES;
-  const segs = testMode ? [PRICE_SEGMENTS[2]] : PRICE_SEGMENTS;
+  const vts = testMode ? [""] : ["", ...VEHICLE_TYPES];
 
   for (const citySlug of cities) {
     const { data: runRow } = await supabase
@@ -353,19 +352,18 @@ async function runScrape(cities: string[], testMode = false) {
     let errorMsg: string | null = null;
 
     for (const vt of vts) {
-      for (const [minP, maxP] of segs) {
-        try {
-          const list = await fetchSegment(proxy, citySlug, vt, minP, maxP);
-          segments++;
-          for (const raw of list) {
-            const n = normalize(raw, citySlug);
-            if (n && !seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
-          }
-          await new Promise((r) => setTimeout(r, 300));
-        } catch (e: any) {
-          errorMsg = e.message;
-          console.error(`Segment ${citySlug}/${vt}/${minP}-${maxP}:`, e.message);
+      try {
+        const list = await fetchSegment(proxy, citySlug, vt);
+        segments++;
+        console.log(`${citySlug}/${vt || "ALL"}: ${list.length} results`);
+        for (const raw of list) {
+          const n = normalize(raw, citySlug);
+          if (n && !seen.has(n.vehicle_id)) seen.set(n.vehicle_id, n);
         }
+        await new Promise((r) => setTimeout(r, 500));
+      } catch (e: any) {
+        errorMsg = e.message;
+        console.error(`Segment ${citySlug}/${vt || "ALL"}:`, e.message);
       }
     }
 
