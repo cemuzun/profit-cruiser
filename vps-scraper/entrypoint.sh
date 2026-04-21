@@ -6,7 +6,7 @@ set -euo pipefail
   echo "DATABASE_URL=${DATABASE_URL}"
   echo "DATA_DIR=${DATA_DIR}"
   echo "TZ=${TZ:-UTC}"
-  echo "ZYTE_API_KEY=${ZYTE_API_KEY:-}"
+  echo "PROXY_LIST=${PROXY_LIST:-}"
   echo "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 } > /etc/environment
 

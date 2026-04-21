@@ -1,16 +1,19 @@
 // Turo scraper — runs inside the Docker container on the VPS.
 // 1. For each city × price-segment × vehicle-type × date-window, opens a
-//    Turo search URL with Playwright (real Chromium, no anti-bot tricks needed
-//    on a residential-ish IP).
-// 2. Extracts vehicle listings from the rendered DOM + Apollo state.
+//    Turo search URL with stealth Playwright (real Chromium + anti-detection).
+// 2. Intercepts Turo's internal XHR/fetch API responses to extract vehicle JSON directly.
 // 3. Aggregates per-vehicle prices across windows (now / +7d / +14d / +30d).
 // 4. Writes to Postgres (listings_current / listings_snapshots / price_forecasts / scrape_runs).
 // 5. Dumps listings.json, forecasts.json, runs.json into DATA_DIR for nginx/Caddy to serve.
 
-// Note: Playwright removed — Zyte API renders pages server-side.
+import { chromium } from "playwright-extra";
+import stealthPlugin from "puppeteer-extra-plugin-stealth";
 import pg from "pg";
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
+
+// Apply stealth plugin — patches ~20 fingerprinting vectors Turo checks
+chromium.use(stealthPlugin());
 
 const { Pool } = pg;
 
@@ -163,138 +166,242 @@ async function extractVehicles(page) {
   });
 }
 
-// ---------- Zyte API client ----------
-// Uses Zyte API browserHtml mode: Zyte renders the page in a real browser on
-// their side (anti-bot bypass + JS execution included) and returns the final
-// HTML. We then parse __NEXT_DATA__ / Apollo state out of that HTML.
-const ZYTE_API_KEY = process.env.ZYTE_API_KEY;
-if (!ZYTE_API_KEY) {
-  console.error("ZYTE_API_KEY is required");
-  process.exit(1);
-}
-const ZYTE_AUTH = "Basic " + Buffer.from(`${ZYTE_API_KEY}:`).toString("base64");
-
-async function zyteFetch(url, { retries = 2 } = {}) {
-  const body = {
-    url,
-    browserHtml: true,
-    javascript: true,
-    geolocation: "US",
-    viewport: { width: 1366, height: 900 },
-    actions: [
-      // Wait for hydration so __NEXT_DATA__ is filled and Apollo cache populated
-      { action: "waitForTimeout", timeout: 4 },
-    ],
+// ---------- Vehicle data extractor ----------
+// Normalises raw vehicle objects from Turo's API JSON into our DB shape.
+function normaliseVehicle(node) {
+  if (!node || typeof node !== "object") return null;
+  const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
+  const price =
+    node.avgDailyPrice?.amount ??
+    node.avgDailyPrice ??
+    node.dailyPrice?.amount ??
+    node.dailyPrice ??
+    node.dailyPriceWithCurrency?.amount ??
+    node.dailyPricing?.dailyPrice ??
+    node.price?.amount;
+  const make = node.make ?? node.vehicle?.make ?? node.makeName;
+  const model = node.model ?? node.vehicle?.model ?? node.modelName;
+  if (!id || !price || (!make && !model)) return null;
+  return {
+    vehicle_id: String(id),
+    make: make ?? null,
+    model: model ?? null,
+    year: Number(node.year ?? node.vehicle?.year) || null,
+    trim: node.trim ?? node.vehicle?.trim ?? null,
+    vehicle_type: node.type ?? node.vehicleType ?? node.vehicle?.type ?? null,
+    fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
+    avg_daily_price: Number(price) || null,
+    completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
+    rating: Number(node.rating ?? node.hostRating ?? node.avgRating) || null,
+    is_all_star_host: Boolean(node.isAllStarHost ?? node.host?.isAllStarHost),
+    host_name: node.hostName ?? node.host?.firstName ?? null,
+    image_url:
+      node.images?.[0]?.originalImageUrl ??
+      node.images?.[0]?.url ??
+      node.imageUrls?.[0] ??
+      node.image?.originalImageUrl ??
+      null,
+    location_city: node.location?.city ?? node.locationCity ?? null,
+    location_state: node.location?.state ?? node.locationState ?? null,
   };
-  let lastErr;
-  for (let i = 0; i <= retries; i++) {
-    try {
-      const res = await fetch("https://api.zyte.com/v1/extract", {
-        method: "POST",
-        headers: {
-          Authorization: ZYTE_AUTH,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`Zyte HTTP ${res.status}: ${txt.slice(0, 200)}`);
-      }
-      const json = await res.json();
-      if (!json.browserHtml) throw new Error("Zyte returned no browserHtml");
-      return json.browserHtml;
-    } catch (e) {
-      lastErr = e;
-      if (i < retries) await new Promise(r => setTimeout(r, 1500 * (i + 1)));
-    }
-  }
-  throw lastErr;
 }
 
-// ---------- HTML extractor (no browser) ----------
-// Pulls vehicle objects out of __NEXT_DATA__ / inline Apollo state inside raw HTML.
-function extractVehiclesFromHtml(html) {
+// Walk a JSON tree and collect all vehicle-shaped nodes.
+function extractFromJson(root) {
   const out = [];
   const seen = new Set();
-
-  function pushFromAny(node) {
-    if (!node || typeof node !== "object") return;
-    const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
-    const price =
-      node.avgDailyPrice ??
-      node.dailyPrice ??
-      node.dailyPriceWithCurrency?.amount ??
-      node.dailyPricing?.dailyPrice ??
-      node.price?.amount;
-    const make = node.make ?? node.vehicle?.make ?? node.makeName;
-    const model = node.model ?? node.vehicle?.model ?? node.modelName;
-    if (id && price && (make || model)) {
-      const vid = String(id);
-      if (seen.has(vid)) return;
-      seen.add(vid);
-      out.push({
-        vehicle_id: vid,
-        make: make ?? null,
-        model: model ?? null,
-        year: Number(node.year ?? node.vehicle?.year) || null,
-        trim: node.trim ?? node.vehicle?.trim ?? null,
-        vehicle_type: node.type ?? node.vehicle?.type ?? null,
-        fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
-        avg_daily_price: Number(price) || null,
-        completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
-        rating: Number(node.rating ?? node.hostRating ?? node.avgRating) || null,
-        is_all_star_host: Boolean(node.isAllStarHost ?? node.host?.isAllStarHost),
-        host_name: node.hostName ?? node.host?.firstName ?? null,
-        image_url:
-          node.images?.[0]?.originalImageUrl ??
-          node.images?.[0]?.url ??
-          node.imageUrls?.[0] ??
-          node.image?.originalImageUrl ??
-          null,
-        location_city: node.location?.city ?? node.locationCity ?? null,
-        location_state: node.location?.state ?? node.locationState ?? null,
-      });
-    }
-  }
-
   function walk(v, depth = 0) {
     if (depth > 10 || v == null) return;
     if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return; }
     if (typeof v === "object") {
-      pushFromAny(v);
+      const n = normaliseVehicle(v);
+      if (n && !seen.has(n.vehicle_id)) { seen.add(n.vehicle_id); out.push(n); }
       for (const k in v) walk(v[k], depth + 1);
     }
   }
-
-  // 1. __NEXT_DATA__
-  const nextMatch = html.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (nextMatch) {
-    try { walk(JSON.parse(nextMatch[1])); } catch (_) {}
-  }
-
-  // 2. Inline Apollo / initial state assignments
-  for (const re of [
-    /window\.__APOLLO_STATE__\s*=\s*({[\s\S]*?});\s*<\/script>/,
-    /window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});\s*<\/script>/,
-  ]) {
-    const m = html.match(re);
-    if (m) {
-      try { walk(JSON.parse(m[1])); } catch (_) {}
-    }
-  }
-
+  walk(root);
   return out;
 }
 
+// ---------- Browser launch args ----------
+const BROWSER_ARGS = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--disable-extensions",
+  "--disable-background-networking",
+];
+
+// ---------- Proxy pool ----------
+
+// Format: HOST:PORT:USERNAME:PASSWORD  (comma-separated)
+// Primary = direct VPS IP (no proxy). Proxies are fallback only.
+const PROXIES = (process.env.PROXY_LIST || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(entry => {
+    const [host, port, username, password] = entry.split(":");
+    return { server: `http://${host}:${port}`, username, password };
+  });
+
+if (PROXIES.length > 0) {
+  console.log(`Proxy pool: ${PROXIES.length} residential proxies loaded as fallback.`);
+}
+
+let proxyIndex = 0; // round-robin counter
+
+// ---------- Core page fetch (one attempt with a given proxy config) ----------
+async function fetchWithContext(browser, url, proxyConfig) {
+  // Create an isolated browser context — proxy is set per context, not per browser
+  const ctxOptions = { viewport: { width: 1280, height: 800 } };
+  if (proxyConfig) ctxOptions.proxy = proxyConfig;
+  const ctx = await browser.newContext(ctxOptions);
+  const page = await ctx.newPage();
+  try {
+    const intercepted = [];
+    page.on("response", async (resp) => {
+      try {
+        const rUrl = resp.url();
+        if (
+          (rUrl.includes("/api/") || rUrl.includes("/search")) &&
+          !rUrl.includes("google") && !rUrl.includes("segment") &&
+          !rUrl.includes("analytics") && !rUrl.includes("newrelic") &&
+          resp.status() === 200
+        ) {
+          const ct = resp.headers()["content-type"] || "";
+          if (ct.includes("json")) {
+            const json = await resp.json().catch(() => null);
+            if (json) intercepted.push(json);
+          }
+        }
+      } catch (_) {}
+    });
+
+    const t0 = Date.now();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await page.waitForTimeout(10_000);
+    const elapsed = Date.now() - t0;
+
+    // Extract vehicles from intercepted API responses
+    let vehicles = [];
+    for (const json of intercepted) {
+      const arr =
+        json?.vehicles ??
+        json?.list ??
+        json?.results ??
+        json?.data?.vehicles ??
+        json?.data?.list ??
+        json?.searchResult?.list ??
+        null;
+      if (Array.isArray(arr) && arr.length > 0) {
+        vehicles.push(...extractFromJson(arr));
+      } else {
+        vehicles.push(...extractFromJson(json));
+      }
+    }
+
+    // Fallback: walk page state if XHR interception found nothing
+    if (vehicles.length === 0) {
+      vehicles = await page.evaluate(() => {
+        function norm(node) {
+          if (!node || typeof node !== "object") return null;
+          const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
+          const price = node.avgDailyPrice?.amount ?? node.avgDailyPrice ??
+            node.dailyPrice ?? node.dailyPriceWithCurrency?.amount ??
+            node.dailyPricing?.dailyPrice ?? node.price?.amount;
+          const make = node.make ?? node.vehicle?.make ?? node.makeName;
+          const model = node.model ?? node.vehicle?.model ?? node.modelName;
+          if (!id || !price || (!make && !model)) return null;
+          return { vehicle_id: String(id), make: make ?? null, model: model ?? null,
+            year: Number(node.year ?? node.vehicle?.year) || null,
+            avg_daily_price: Number(price) || null,
+            vehicle_type: node.type ?? node.vehicleType ?? node.vehicle?.type ?? null,
+            fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
+            completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
+            rating: Number(node.rating ?? node.hostRating ?? node.avgRating) || null,
+            is_all_star_host: Boolean(node.isAllStarHost ?? node.host?.isAllStarHost),
+            host_name: node.hostName ?? node.host?.firstName ?? null,
+            image_url: node.images?.[0]?.originalImageUrl ?? node.images?.[0]?.url ?? null,
+            location_city: node.location?.city ?? node.locationCity ?? null,
+            location_state: node.location?.state ?? node.locationState ?? null,
+          };
+        }
+        const out = []; const seen = new Set();
+        function walk(v, d = 0) {
+          if (d > 10 || v == null) return;
+          if (Array.isArray(v)) { for (const x of v) walk(x, d + 1); return; }
+          if (typeof v === "object") {
+            const n = norm(v);
+            if (n && !seen.has(n.vehicle_id)) { seen.add(n.vehicle_id); out.push(n); }
+            for (const k in v) walk(v[k], d + 1);
+          }
+        }
+        const nextEl = document.getElementById("__NEXT_DATA__");
+        if (nextEl) { try { walk(JSON.parse(nextEl.textContent)); } catch (_) {} }
+        if (window.__APOLLO_STATE__) walk(window.__APOLLO_STATE__);
+        if (window.__INITIAL_STATE__) walk(window.__INITIAL_STATE__);
+        return out;
+      });
+    }
+
+    // Dedup by vehicle_id
+    const seen = new Set();
+    vehicles = vehicles.filter(v => { if (seen.has(v.vehicle_id)) return false; seen.add(v.vehicle_id); return true; });
+
+    const via = proxyConfig ? `proxy ${proxyConfig.server}` : "direct";
+    console.log(`    [${elapsed}ms] via ${via}: intercepted=${intercepted.length} blobs → ${vehicles.length} vehicles`);
+    return vehicles;
+  } finally {
+    await page.close().catch(() => {});
+    await ctx.close().catch(() => {});
+  }
+}
+
+// ---------- Stealth Playwright fetch with proxy fallback ----------
+// 1st try: direct VPS IP (free, fast).
+// If 0 vehicles returned (IP blocked), automatically retry with the next proxy
+// from the pool in round-robin order.
+async function stealthFetch(browser, url) {
+  // Always try direct first
+  try {
+    const vehicles = await fetchWithContext(browser, url, null);
+    if (vehicles.length > 0) return vehicles;
+    console.log(`    Direct returned 0 vehicles — trying proxy fallback...`);
+  } catch (e) {
+    console.warn(`    Direct attempt failed (${e.message}) — trying proxy fallback...`);
+  }
+
+  // Proxy fallback — try each proxy once in round-robin
+  if (PROXIES.length === 0) {
+    console.warn(`    No proxies configured. Returning empty.`);
+    return [];
+  }
+
+  const startIdx = proxyIndex;
+  for (let i = 0; i < PROXIES.length; i++) {
+    const proxy = PROXIES[proxyIndex % PROXIES.length];
+    proxyIndex = (proxyIndex + 1) % PROXIES.length;
+    try {
+      const vehicles = await fetchWithContext(browser, url, proxy);
+      if (vehicles.length > 0) return vehicles;
+    } catch (e) {
+      console.warn(`    Proxy ${proxy.server} failed: ${e.message}`);
+    }
+    if (proxyIndex === startIdx) break; // cycled through all
+  }
+
+  return [];
+}
+
 // ---------- Per-segment scrape ----------
-async function scrapeSegment(_unused, citySlug, win, minP, maxP, vt) {
+async function scrapeSegment(browser, citySlug, win, minP, maxP, vt) {
   const url = buildSearchUrl(CITIES[citySlug], win, minP, maxP, vt);
   const label = `${citySlug}/${win.key}/${vt ?? "ALL"}/$${minP}-${maxP}`;
   try {
-    const html = await zyteFetch(url);
-    const vehicles = extractVehiclesFromHtml(html);
-    console.log(`  ${label}: ${vehicles.length} vehicles (html ${html.length}b)`);
+    const vehicles = await stealthFetch(browser, url);
+    console.log(`  ${label}: ${vehicles.length} vehicles`);
     return vehicles;
   } catch (e) {
     console.error(`  ${label} FAILED: ${e.message}`);
@@ -325,7 +432,8 @@ async function scrapeCity(browser, citySlug) {
     }
   }
 
-  const CONCURRENCY = 2;
+  // Keep concurrency at 1 — each browser tab uses ~200 MB RAM
+  const CONCURRENCY = 1;
   let cursor = 0;
   await Promise.all(
     Array.from({ length: CONCURRENCY }, async () => {
@@ -551,7 +659,9 @@ async function dumpJson() {
 }
 
 // ---------- Exports for test-scrape.mjs ----------
-export async function launchBrowser() { return null; } // kept for backward compat
+export async function launchBrowser() {
+  return chromium.launch({ headless: true, args: BROWSER_ARGS });
+}
 export { scrapeCity, scrapeSegment, CITIES, WINDOWS, PRICE_SEGMENTS, VEHICLE_TYPES, pool };
 
 // ---------- Main ----------
@@ -559,13 +669,17 @@ async function main() {
   const cities = process.argv.slice(2).filter(Boolean);
   const targets = cities.length ? cities : Object.keys(CITIES);
 
+  // One shared browser instance for the whole run — avoids the overhead of
+  // launching Chromium per segment while keeping a single clean process.
+  const browser = await chromium.launch({ headless: true, args: BROWSER_ARGS });
   try {
     for (const c of targets) {
-      try { await scrapeCity(null, c); }
+      try { await scrapeCity(browser, c); }
       catch (e) { console.error(`City ${c} crashed:`, e); }
     }
     await dumpJson();
   } finally {
+    await browser.close().catch(() => {});
     await pool.end();
   }
 }

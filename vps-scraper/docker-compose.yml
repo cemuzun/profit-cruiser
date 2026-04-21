@@ -27,7 +27,9 @@ services:
       DATABASE_URL: postgres://turo:${POSTGRES_PASSWORD}@postgres:5432/turo
       DATA_DIR: /data
       TZ: UTC
-      ZYTE_API_KEY: ${ZYTE_API_KEY}
+      # No API key needed — stealth Playwright scrapes directly from the VPS IP
+      # Falls back to residential proxies if VPS IP gets blocked.
+      PROXY_LIST: ${PROXY_LIST:-}
     volumes:
       - ./data:/data
     # Run cron in foreground; cron jobs invoke node scraper.mjs
