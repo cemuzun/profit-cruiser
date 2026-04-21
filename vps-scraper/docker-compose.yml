@@ -30,7 +30,7 @@ services:
     volumes:
       - ./data:/data
     # Run cron in foreground; cron jobs invoke node scraper.mjs
-    command: ["crond", "-f", "-l", "8"]
+    command: ["cron", "-f"]
 
   caddy:
     image: caddy:2-alpine
