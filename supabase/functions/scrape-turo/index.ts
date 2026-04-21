@@ -31,6 +31,14 @@ const CITIES: Record<
     region: "FL",
     placeId: "ChIJEcHIDqKw2YgRZU-t3XHylv8",
   },
+  "honolulu": {
+    country: "US",
+    name: "Honolulu",
+    lat: 21.3098845,
+    lng: -157.8581401,
+    region: "HI",
+    placeId: "ChIJTUbU9o9rAHwR_lMnUydM3qg",
+  },
 };
 
 const PRICE_SEGMENTS: Array<[number, number]> = [
@@ -402,7 +410,7 @@ Deno.serve(async (req) => {
 
   let body: any = {};
   try { body = await req.json(); } catch (_) {}
-  const cities: string[] = body.cities ?? ["los-angeles", "miami"];
+  const cities: string[] = body.cities ?? ["los-angeles", "miami", "honolulu"];
   const testMode: boolean = body.test === true;
 
   if (testMode) {

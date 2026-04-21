@@ -43,9 +43,10 @@ type Listing = {
 };
 
 const CITY_OPTIONS = [
-  { value: "all", label: "Both cities" },
+  { value: "all", label: "All cities" },
   { value: "los-angeles", label: "Los Angeles" },
   { value: "miami", label: "Miami" },
+  { value: "honolulu", label: "Honolulu" },
 ];
 
 export default function Dashboard() {
@@ -98,7 +99,7 @@ export default function Dashboard() {
 
   const refresh = useMutation({
     mutationFn: async () => {
-      const cities = city === "all" ? ["los-angeles", "miami"] : [city];
+      const cities = city === "all" ? ["los-angeles", "miami", "honolulu"] : [city];
       const toastId = toast.loading(
         `Starting full scrape for ${cities.join(", ")} — this runs in the background and takes 5–10 minutes for ALL cars.`,
       );
@@ -181,7 +182,7 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold">Market Dashboard</h1>
             <p className="text-sm text-muted-foreground">
-              Most profitable Turo cars in LA & Miami, ranked by estimated monthly profit.
+              Most profitable Turo cars in LA, Miami & Honolulu, ranked by estimated monthly profit.
             </p>
           </div>
           <div className="flex items-center gap-2">

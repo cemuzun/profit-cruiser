@@ -20,9 +20,10 @@ import { TrendingUp, TrendingDown, Calendar, Database } from "lucide-react";
 import { format } from "date-fns";
 
 const CITY_OPTIONS = [
-  { value: "all", label: "Both cities" },
+  { value: "all", label: "All cities" },
   { value: "los-angeles", label: "Los Angeles" },
   { value: "miami", label: "Miami" },
+  { value: "honolulu", label: "Honolulu" },
 ];
 
 export default function Seasonality() {
