@@ -163,6 +163,17 @@ async function extractVehicles(page) {
   });
 }
 
+// ---------- Proxy config (APN Proxy or any HTTP/HTTPS proxy) ----------
+// Set PROXY_SERVER (e.g. "http://gw.apnproxy.com:8080"), PROXY_USERNAME, PROXY_PASSWORD.
+const PROXY = process.env.PROXY_SERVER
+  ? {
+      server: process.env.PROXY_SERVER,
+      username: process.env.PROXY_USERNAME || undefined,
+      password: process.env.PROXY_PASSWORD || undefined,
+    }
+  : null;
+if (PROXY) console.log(`Using proxy: ${PROXY.server} (user=${PROXY.username ? "set" : "none"})`);
+
 // ---------- Per-segment scrape ----------
 async function scrapeSegment(browser, citySlug, win, minP, maxP, vt) {
   const url = buildSearchUrl(CITIES[citySlug], win, minP, maxP, vt);
@@ -173,6 +184,19 @@ async function scrapeSegment(browser, citySlug, win, minP, maxP, vt) {
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     locale: "en-US",
     timezoneId: "America/Los_Angeles",
+    ...(PROXY ? { proxy: PROXY } : {}),
+    extraHTTPHeaders: {
+      "Accept-Language": "en-US,en;q=0.9",
+      "Upgrade-Insecure-Requests": "1",
+    },
+  });
+  // Mask the most obvious headless fingerprints.
+  await ctx.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    Object.defineProperty(navigator, "languages", { get: () => ["en-US", "en"] });
+    Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+    // @ts-ignore
+    window.chrome = { runtime: {} };
   });
   const page = await ctx.newPage();
   try {
