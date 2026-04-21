@@ -14,6 +14,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
+import { scrapeCityInBrowser } from "@/lib/scrapeTuro";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
 import { Loader2, RefreshCw, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
 import { toast } from "sonner";
@@ -90,21 +91,37 @@ export default function Dashboard() {
     },
   });
 
+  const [progress, setProgress] = useState<{ city: string; done: number; total: number; found: number } | null>(null);
+
   const refresh = useMutation({
     mutationFn: async () => {
-      const { data, error } = await supabase.functions.invoke("scrape-turo", {
-        body: { cities: city === "all" ? ["los-angeles", "miami"] : [city] },
-      });
-      if (error) throw error;
-      return data;
+      const cities = city === "all" ? ["los-angeles", "miami"] : [city];
+      let grandTotal = 0;
+      for (const c of cities) {
+        const toastId = toast.loading(`Scraping ${c}…`);
+        const { rows, segments, error } = await scrapeCityInBrowser(c, (p) => {
+          setProgress(p);
+          toast.loading(`Scraping ${c} — ${p.done}/${p.total} segments, ${p.found} cars`, { id: toastId });
+        });
+        const { error: ingestErr } = await supabase.functions.invoke("ingest-listings", {
+          body: { city: c, rows, segments, error },
+        });
+        if (ingestErr) throw ingestErr;
+        grandTotal += rows.length;
+        toast.success(`${c}: ${rows.length} cars saved${error ? ` (some segments failed)` : ""}`, { id: toastId });
+      }
+      setProgress(null);
+      return { total: grandTotal };
     },
-    onSuccess: (data: any) => {
-      const total = (data?.summary ?? []).reduce((a: number, s: any) => a + (s.count ?? 0), 0);
-      toast.success(`Scrape complete — ${total} vehicles fetched`);
+    onSuccess: (data) => {
+      toast.success(`Scrape complete — ${data.total} vehicles total`);
       qc.invalidateQueries({ queryKey: ["listings-current"] });
       qc.invalidateQueries({ queryKey: ["price-history"] });
     },
-    onError: (e: any) => toast.error(`Scrape failed: ${e.message}`),
+    onError: (e: any) => {
+      setProgress(null);
+      toast.error(`Scrape failed: ${e.message}`);
+    },
   });
 
   const enriched = useMemo(() => {
@@ -179,6 +196,11 @@ export default function Dashboard() {
             </Button>
           </div>
         </div>
+        {progress && (
+          <div className="text-xs text-muted-foreground">
+            Scraping {progress.city}: segment {progress.done}/{progress.total} · {progress.found} unique cars found
+          </div>
+        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi icon={CarIcon} label="Listings tracked" value={kpis?.count ?? 0} />
