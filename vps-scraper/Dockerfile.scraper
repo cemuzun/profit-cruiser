@@ -24,4 +24,5 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
-CMD ["crond", "-f", "-l", "8"]
+# Ubuntu's cron binary is `cron` (Alpine uses `crond`). -f keeps it foreground.
+CMD ["cron", "-f"]
