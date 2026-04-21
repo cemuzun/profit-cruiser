@@ -158,12 +158,10 @@ function dechunk(body: Uint8Array): Uint8Array {
   return new Uint8Array(out);
 }
 
-async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<any> {
-  // 1. Open raw TCP to proxy
+async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string, body: string, refererUrl: string): Promise<any> {
   const conn = await Deno.connect({ hostname: proxy.host, port: proxy.port });
 
   try {
-    // 2. Send CONNECT
     const auth =
       proxy.user || proxy.pass
         ? `Proxy-Authorization: Basic ${btoa(`${proxy.user ?? ""}:${proxy.pass ?? ""}`)}\r\n`
@@ -175,48 +173,38 @@ async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<an
       `\r\n`;
     await conn.write(new TextEncoder().encode(connectReq));
 
-    // 3. Read CONNECT response
     const reader = conn.readable.getReader();
     const { head: connectHead, rest: leftover } = await readUntil(reader, "\r\n\r\n");
     if (!/^HTTP\/1\.[01] 200/.test(connectHead)) {
       throw new Error(`Proxy CONNECT failed: ${connectHead.split("\r\n")[0]}`);
     }
-    if (leftover.length > 0) {
-      throw new Error("Unexpected data after CONNECT response");
-    }
+    if (leftover.length > 0) throw new Error("Unexpected data after CONNECT response");
     reader.releaseLock();
 
-    // 4. Upgrade socket to TLS
     const tls = await Deno.startTls(conn, { hostname: TURO_HOST });
 
     try {
-      // 5. Send HTTP request over TLS
-      const req = browserHeaders(pathAndQuery).join("\r\n");
+      const req = buildPostRequest(pathAndQuery, body, refererUrl);
       await tls.write(new TextEncoder().encode(req));
 
-      // 6. Read response
       const tlsReader = tls.readable.getReader();
       const { head, rest } = await readUntil(tlsReader, "\r\n\r\n");
       const bodyBytes = await readAll(tlsReader, rest);
 
-      // Parse status
       const statusLine = head.split("\r\n")[0];
       const statusMatch = statusLine.match(/HTTP\/1\.[01] (\d+)/);
       const status = statusMatch ? Number(statusMatch[1]) : 0;
 
-      // Detect chunked
       const isChunked = /transfer-encoding:\s*chunked/i.test(head);
       const finalBody = isChunked ? dechunk(bodyBytes) : bodyBytes;
 
-      // Detect gzip — most servers won't gzip if we don't send Accept-Encoding,
-      // and we don't, so we should be fine. But guard:
       if (/content-encoding:\s*(gzip|br|deflate)/i.test(head)) {
         throw new Error("Got encoded response — not supported");
       }
 
       const text = new TextDecoder().decode(finalBody);
       if (status !== 200) {
-        throw new Error(`Turo ${status}: ${text.slice(0, 200)}`);
+        throw new Error(`Turo ${status}: ${text.slice(0, 300)}`);
       }
       return JSON.parse(text);
     } finally {
@@ -228,42 +216,52 @@ async function fetchViaProxy(proxy: ProxyConf, pathAndQuery: string): Promise<an
   }
 }
 
-function pickupReturnDates() {
-  const start = new Date();
-  start.setDate(start.getDate() + 7);
-  start.setHours(10, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 3);
-  return {
-    pickupDate: start.toISOString().slice(0, 10),
-    pickupTime: "10:00",
-    dropoffDate: end.toISOString().slice(0, 10),
-    dropoffTime: "10:00",
-  };
-}
-
-async function fetchSegment(proxy: ProxyConf, citySlug: string, vehicleType: string, minPrice: number, maxPrice: number) {
-  const city = CITIES[citySlug];
-  if (!city) throw new Error(`Unknown city ${citySlug}`);
-  const dates = pickupReturnDates();
-
+function buildRefererUrl(city: typeof CITIES[string]): string {
   const params = new URLSearchParams({
+    age: "30",
     country: city.country,
     defaultZoomLevel: "11",
     isMapSearch: "false",
     itemsPerPage: "200",
+    latitude: String(city.lat),
     location: city.name,
-    locationType: "City",
-    pickupTime: `${dates.pickupDate}T${dates.pickupTime}`,
-    returnTime: `${dates.dropoffDate}T${dates.dropoffTime}`,
-    region: city.country,
+    locationType: "CITY",
+    longitude: String(city.lng),
+    pickupType: "ALL",
+    placeId: city.placeId,
+    region: city.region,
+    searchDurationType: "DAILY",
     sortType: "RELEVANCE",
-    types: vehicleType,
-    minDailyPriceUSD: String(minPrice),
-    maxDailyPriceUSD: String(maxPrice),
+  });
+  return `https://turo.com/us/en/search?${params.toString()}`;
+}
+
+async function fetchSegment(proxy: ProxyConf, citySlug: string, vehicleType: string) {
+  const city = CITIES[citySlug];
+  if (!city) throw new Error(`Unknown city ${citySlug}`);
+
+  const body = JSON.stringify({
+    filters: {
+      age: 30,
+      engines: [],
+      features: [],
+      location: {
+        country: city.country,
+        type: "area",
+        point: { lat: city.lat, lng: city.lng },
+      },
+      makes: [],
+      models: [],
+      tmvTiers: [],
+      types: vehicleType ? [vehicleType] : [],
+    },
+    flexibleType: "NOT_FLEXIBLE",
+    searchDurationType: "DAILY",
+    sorts: { direction: "ASC", type: "RELEVANCE" },
   });
 
-  const data = await fetchViaProxy(proxy, `/api/v2/search?${params.toString()}`);
+  const referer = buildRefererUrl(city);
+  const data = await fetchViaProxy(proxy, "/api/v2/search", body, referer);
   const list =
     data?.searchResults ??
     data?.vehicles ??
