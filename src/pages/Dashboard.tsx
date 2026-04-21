@@ -196,6 +196,11 @@ export default function Dashboard() {
             </Button>
           </div>
         </div>
+        {progress && (
+          <div className="text-xs text-muted-foreground">
+            Scraping {progress.city}: segment {progress.done}/{progress.total} · {progress.found} unique cars found
+          </div>
+        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi icon={CarIcon} label="Listings tracked" value={kpis?.count ?? 0} />
