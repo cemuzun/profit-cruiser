@@ -14,7 +14,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
-import { scrapeCityInBrowser } from "@/lib/scrapeTuro";
+// Server-side Firecrawl scraper handles all segments and bypasses Cloudflare.
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
 import { Loader2, RefreshCw, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
 import { toast } from "sonner";
@@ -96,31 +96,29 @@ export default function Dashboard() {
   const refresh = useMutation({
     mutationFn: async () => {
       const cities = city === "all" ? ["los-angeles", "miami"] : [city];
-      let grandTotal = 0;
-      for (const c of cities) {
-        const toastId = toast.loading(`Scraping ${c}…`);
-        const { rows, segments, error } = await scrapeCityInBrowser(c, (p) => {
-          setProgress(p);
-          toast.loading(`Scraping ${c} — ${p.done}/${p.total} segments, ${p.found} cars`, { id: toastId });
-        });
-        const { error: ingestErr } = await supabase.functions.invoke("ingest-listings", {
-          body: { city: c, rows, segments, error },
-        });
-        if (ingestErr) throw ingestErr;
-        grandTotal += rows.length;
-        toast.success(`${c}: ${rows.length} cars saved${error ? ` (some segments failed)` : ""}`, { id: toastId });
-      }
-      setProgress(null);
-      return { total: grandTotal };
+      const toastId = toast.loading(
+        `Starting full scrape for ${cities.join(", ")} — this runs in the background and takes 5–10 minutes for ALL cars.`,
+      );
+      const { data, error } = await supabase.functions.invoke("scrape-turo", {
+        body: { cities },
+      });
+      if (error) throw error;
+      toast.success(
+        data?.message ?? `Scrape started for ${cities.join(", ")}. Refresh the page in a few minutes.`,
+        { id: toastId, duration: 8000 },
+      );
+      return data;
     },
-    onSuccess: (data) => {
-      toast.success(`Scrape complete — ${data.total} vehicles total`);
-      qc.invalidateQueries({ queryKey: ["listings-current"] });
-      qc.invalidateQueries({ queryKey: ["price-history"] });
+    onSuccess: () => {
+      // Poll for fresh data after the background job has had time to write rows.
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["listings-current"] });
+        qc.invalidateQueries({ queryKey: ["price-history"] });
+        qc.invalidateQueries({ queryKey: ["scrape-runs"] });
+      }, 15000);
     },
     onError: (e: any) => {
-      setProgress(null);
-      toast.error(`Scrape failed: ${e.message}`);
+      toast.error(`Scrape failed to start: ${e.message}`);
     },
   });
 
