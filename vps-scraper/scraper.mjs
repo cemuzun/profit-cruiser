@@ -163,8 +163,8 @@ async function extractVehicles(page) {
   });
 }
 
-// ---------- Proxy config (APN Proxy or any HTTP/HTTPS proxy) ----------
-// Set PROXY_SERVER (e.g. "http://gw.apnproxy.com:8080"), PROXY_USERNAME, PROXY_PASSWORD.
+// ---------- Proxy config (ARN Proxy or any HTTP/HTTPS proxy) ----------
+// Set PROXY_SERVER (e.g. "http://gate.arnproxy.com:PORT"), PROXY_USERNAME, PROXY_PASSWORD.
 const PROXY = process.env.PROXY_SERVER
   ? {
       server: process.env.PROXY_SERVER,
