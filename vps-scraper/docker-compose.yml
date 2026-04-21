@@ -27,6 +27,9 @@ services:
       DATABASE_URL: postgres://turo:${POSTGRES_PASSWORD}@postgres:5432/turo
       DATA_DIR: /data
       TZ: UTC
+      BRD_USER: ${BRD_USER:-}
+      BRD_PASS: ${BRD_PASS:-}
+      BRD_SERVER: ${BRD_SERVER:-}
       PROXY_SERVER: ${PROXY_SERVER:-}
       PROXY_USERNAME: ${PROXY_USERNAME:-}
       PROXY_PASSWORD: ${PROXY_PASSWORD:-}
