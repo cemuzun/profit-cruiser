@@ -99,7 +99,7 @@ export default function Analyzer() {
           <>
             {!stats ? (
               <Card><CardContent className="pt-4 text-sm text-muted-foreground">
-                No comparable listings found in our database for {make} {model} in {city}. The VPS scraper publishes fresh data every 12h — check back after the next run.
+                No comparable listings found in our database for {make} {model} in {city}. Trigger a scrape from the dashboard or wait for the next daily auto-refresh.
               </CardContent></Card>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
