@@ -19,7 +19,8 @@ function PriceTile({ label, value }: { label: string; value: number | null | und
     </div>
   );
 }
-import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink } from "lucide-react";
+import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink, Download } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { format } from "date-fns";
 import { toast } from "sonner";
