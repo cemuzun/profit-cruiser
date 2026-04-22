@@ -184,7 +184,21 @@ export const ds = {
     const { data, error } = await supabase.functions.invoke("scrape-turo", {
       body: citySlug ? { city: citySlug } : { all: true },
     });
-    if (error) throw error;
+    if (error) throw new Error(error.message || "Scrape function failed");
+    if (data && data.ok === false) {
+      throw new Error(data.error || "Scrape failed");
+    }
+    // Surface partial failures (some cities errored)
+    if (data?.results) {
+      const failed = Object.entries(data.results).filter(
+        ([, r]: any) => r?.error,
+      );
+      if (failed.length > 0) {
+        const names = failed.map(([slug]) => slug).join(", ");
+        const firstMsg = (failed[0][1] as any).error;
+        throw new Error(`Failed for ${names}: ${firstMsg}`);
+      }
+    }
     return data;
   },
 };
