@@ -56,10 +56,8 @@ export default function Settings() {
               <Field label="Insurance / month ($)" value={form.insurance_monthly} onChange={set("insurance_monthly")} />
               <Field label="Maintenance / month ($)" value={form.maintenance_monthly} onChange={set("maintenance_monthly")} />
               <Field label="Cleaning / trip ($)" value={form.cleaning_per_trip} onChange={set("cleaning_per_trip")} />
-              <Field label="Depreciation %/yr" value={form.depreciation_pct_annual} onChange={set("depreciation_pct_annual")} />
               <Field label="Registration / month ($)" value={form.registration_monthly} onChange={set("registration_monthly")} />
               <Field label="Tires / month ($)" value={form.tires_monthly} onChange={set("tires_monthly")} />
-              <Field label="Default purchase price ($)" value={form.default_purchase_price} onChange={set("default_purchase_price")} />
               <Field
                 label="Trips/month estimate"
                 value={form.trips_per_month_estimate}
@@ -79,11 +77,29 @@ export default function Settings() {
                   </TabsList>
                 </Tabs>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                <Field label="Default lease $/mo" value={form.default_lease_monthly} onChange={set("default_lease_monthly")} />
-                <Field label="Default lease down ($)" value={form.default_lease_down} onChange={set("default_lease_down")} />
-                <Field label="Default lease term (mo)" value={form.default_lease_term_months} onChange={set("default_lease_term_months")} />
-              </div>
+
+              {form.default_acquisition_mode === "buy" ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    Buy mode uses an upfront <strong className="text-foreground">purchase price</strong> and applies monthly <strong className="text-foreground">depreciation</strong> as a cost. Payback = purchase price ÷ monthly profit.
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <Field label="Default purchase price ($)" value={form.default_purchase_price} onChange={set("default_purchase_price")} />
+                    <Field label="Depreciation %/yr" value={form.depreciation_pct_annual} onChange={set("depreciation_pct_annual")} hint="Annual depreciation applied to purchase price; charged monthly as a cost." />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    Lease mode uses a monthly <strong className="text-foreground">lease payment</strong> + amortized <strong className="text-foreground">down payment</strong> over the term. No depreciation cost. Payback shown is recovery of the down payment only.
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <Field label="Default lease $/mo" value={form.default_lease_monthly} onChange={set("default_lease_monthly")} />
+                    <Field label="Default lease down ($)" value={form.default_lease_down} onChange={set("default_lease_down")} />
+                    <Field label="Default lease term (mo)" value={form.default_lease_term_months} onChange={set("default_lease_term_months")} />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="pt-2">
