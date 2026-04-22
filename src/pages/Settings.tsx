@@ -94,6 +94,14 @@ export default function Settings() {
                 <Field label="Avg miles per trip" value={form.default_avg_miles_per_trip} onChange={set("default_avg_miles_per_trip")} hint="Used when 'Avg miles per day' is empty. Estimated miles/mo = trips/mo × avg miles per trip." />
                 <Field label="Avg miles per day (optional)" value={form.default_avg_miles_per_day ?? ""} onChange={set("default_avg_miles_per_day" as any)} hint="If set, takes precedence over per-trip. Estimated miles/mo = 30 × utilization% × avg miles per day." />
               </div>
+              {form.default_avg_miles_per_day != null && Number(form.default_avg_miles_per_day) > 0 && Number(form.default_avg_miles_per_trip) > 0 && (
+                <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                  <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    Both <strong>Avg miles per day</strong> and <strong>Avg miles per trip</strong> are set. <strong>Per day takes precedence</strong> — per trip is ignored until you clear the per-day field.
+                  </span>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 pt-2">
               <Button onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>

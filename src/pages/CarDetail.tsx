@@ -334,6 +334,11 @@ export default function CarDetail() {
                 <Field label="Avg miles per trip" value={form.avg_miles_per_trip} onChange={(v) => setForm({ ...form, avg_miles_per_trip: v })} />
                 <Field label="Avg miles per day" value={form.avg_miles_per_day} onChange={(v) => setForm({ ...form, avg_miles_per_day: v })} />
               </div>
+              {form.avg_miles_per_day != null && Number(form.avg_miles_per_day) > 0 && form.avg_miles_per_trip != null && Number(form.avg_miles_per_trip) > 0 && (
+                <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                  Both <strong>Avg miles per day</strong> and <strong>Avg miles per trip</strong> are set. <strong>Per day takes precedence</strong> — per trip is ignored until you clear the per-day field.
+                </div>
+              )}
               <p className="text-xs text-muted-foreground mt-2">
                 If <em>avg miles per day</em> is set, miles/mo = 30 × utilization% × miles/day. Otherwise miles/mo = trips/mo × miles/trip. Overage applies in both buy and lease modes.
               </p>
