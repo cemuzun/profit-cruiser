@@ -267,10 +267,10 @@ async function fetchWithContext(browser, url, proxyConfig) {
         if (
           (rUrl.includes("/api/") || rUrl.includes("/search")) &&
           !rUrl.includes("google") && !rUrl.includes("segment") &&
-          !rUrl.includes("analytics") && !rUrl.includes("newrelic") &&
-          resp.status() === 200
+          !rUrl.includes("analytics") && !rUrl.includes("newrelic")
         ) {
           const ct = resp.headers()["content-type"] || "";
+          console.log(`      ↳ ${resp.status()} ${rUrl.slice(0, 80)}`);
           if (ct.includes("json")) {
             const json = await resp.json().catch(() => null);
             if (json) intercepted.push(json);
