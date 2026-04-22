@@ -292,8 +292,7 @@ async function geonixFetch(
   expectJson: boolean,
   attempt = 1,
 ): Promise<{ html?: string; json?: any }> {
-  const sessionId = rand();
-  const proxy = buildProxyWithSession(sessionId);
+  const proxy = buildProxyUrl();
   if (!proxy) throw new Error("GEONIX_PROXY_URL not configured");
 
   const headers: Record<string, string> = {
