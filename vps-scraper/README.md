@@ -79,3 +79,50 @@ ufw allow 443
 - `scraper.mjs` — Playwright scraper, dumps JSON at the end
 - `crontab` — `0 8,20 * * *` runs scraper.mjs
 - `.env.example` — copy to `.env`, set `POSTGRES_PASSWORD`
+
+## Path B: Discover internal XHR endpoints from a valid session
+
+Use this when `curl`/plain HTTP gets Cloudflare challenged. The script opens the Turo search page in Playwright and records all `turo.com/api` calls (URL, method, status, headers) into a JSON artifact.
+
+```bash
+cd /opt/turo-scraper/vps-scraper
+npm install
+npx playwright install chromium
+
+# 1) Optional: run headful once and solve challenge/login manually.
+#    Add --proxy if you want to test a residential exit.
+npm run discover:xhr -- \
+  --headful \
+  --install-browser \
+  --proxy "http://USER:PASS@HOST:PORT" \
+  --city "Los Angeles" --region CA \
+  --place-id "ChIJE9on3F3HwoAR9AhGJW_fL-I"
+
+# 2) Re-run headless using the saved storage state from step 1.
+npm run discover:xhr -- \
+  --storage-state ./state/turo.json \
+  --city "Los Angeles" --region CA \
+  --place-id "ChIJE9on3F3HwoAR9AhGJW_fL-I"
+```
+
+Artifacts are written to `./artifacts/turo-xhr-*.json` and can be used to wire a direct API collector.
+
+Tip: if your VPS has no GUI/X server, use one of these:
+
+```bash
+# Run headful under virtual display (lets you solve challenge interactively via Xvfb)
+xvfb-run -a npm run discover:xhr -- --headful --proxy "http://USER:PASS@HOST:PORT"
+
+# OR auto-fallback to headless (no manual challenge solve)
+npm run discover:xhr -- --headful --auto-headless --proxy "http://USER:PASS@HOST:PORT"
+
+# OR auto-install Chromium if missing
+npm run discover:xhr -- --install-browser --auto-headless --proxy "http://USER:PASS@HOST:PORT"
+```
+
+Tip: If `count=0`, re-run with `--headful` (or `xvfb-run`) and wait for the challenge to clear before closing.
+
+Quick check:
+```bash
+npm run discover:xhr -- --help
+```
