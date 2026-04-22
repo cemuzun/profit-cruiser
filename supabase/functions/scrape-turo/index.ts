@@ -285,42 +285,61 @@ function findObjectEnd(s: string, fromIdx: number): number {
   return -1;
 }
 
-async function firecrawlFetch(url: string, expectJson: boolean): Promise<{ html?: string; json?: any } | null> {
-  const resp = await fetch("https://api.firecrawl.dev/v2/scrape", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      url,
-      formats: ["rawHtml"],
-      onlyMainContent: false,
-      waitFor: expectJson ? 0 : 4000,
-      location: { country: "US", languages: ["en"] },
-    }),
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    console.error(`Firecrawl ${resp.status}: ${text.slice(0, 300)}`);
-    return null;
-  }
-  const data = await resp.json();
-  const raw = data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? null;
-  if (!raw) return null;
-  if (expectJson) {
-    // The API endpoint returns JSON; Firecrawl wraps it in <html><body><pre>...</pre></body></html>
-    const stripped = raw.replace(/<[^>]+>/g, "").trim();
-    try {
-      return { json: JSON.parse(stripped) };
-    } catch {
-      // Sometimes the JSON sits inside a <pre> tag — try a more targeted match
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) {
-        try { return { json: JSON.parse(m[0]) }; } catch {}
+// Geonix-proxied fetch with rotating session + UA. Throws on failure.
+async function geonixFetch(
+  url: string,
+  expectJson: boolean,
+  attempt = 1,
+): Promise<{ html?: string; json?: any }> {
+  const sessionId = rand();
+  const proxy = buildProxyWithSession(sessionId);
+  if (!proxy) throw new Error("GEONIX_PROXY_URL not configured");
+
+  const headers: Record<string, string> = {
+    "User-Agent": pick(UAS),
+    "Accept": expectJson
+      ? "application/json, text/plain, */*"
+      : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": pick(LOCALES),
+    "Referer": "https://turo.com/us/en/search",
+  };
+  if (expectJson) headers["x-requested-with"] = "XMLHttpRequest";
+
+  try {
+    const init: RequestInit & { client?: Deno.HttpClient } = {
+      headers,
+      signal: AbortSignal.timeout(30000),
+    };
+    // @ts-ignore - createHttpClient is available in Deno Deploy edge runtime
+    const client = Deno.createHttpClient({ proxy: { url: proxy } });
+    init.client = client;
+
+    const res = await fetch(url, init);
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+
+    if (expectJson) {
+      try {
+        return { json: JSON.parse(text) };
+      } catch {
+        const m = text.match(/\{[\s\S]*\}/);
+        if (m) {
+          try { return { json: JSON.parse(m[0]) }; } catch {}
+        }
+        throw new Error("Geonix returned non-JSON for API endpoint");
       }
-      return { html: raw };
     }
+    return { html: text };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log(`geonix attempt ${attempt} failed: ${msg}`);
+    if (attempt < 3) {
+      await new Promise((r) => setTimeout(r, 600 * attempt));
+      return geonixFetch(url, expectJson, attempt + 1);
+    }
+    throw new Error(`Geonix fetch failed after 3 attempts: ${msg}`);
+  }
+}
   }
   return { html: raw };
 }
