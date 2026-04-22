@@ -11,8 +11,10 @@ import { supabase } from "@/integrations/supabase/client";
 
 const STORAGE_KEY = "proxy_settings_v1";
 
+type ProxyProtocol = "http" | "https" | "socks5";
+
 type ProxyForm = {
-  protocol: "http" | "https";
+  protocol: ProxyProtocol;
   host: string;
   port: string;
   username: string;
@@ -120,11 +122,12 @@ export default function Proxy() {
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   value={form.protocol}
                   onChange={(e) =>
-                    setForm({ ...form, protocol: e.target.value as "http" | "https" })
+                    setForm({ ...form, protocol: e.target.value as ProxyProtocol })
                   }
                 >
                   <option value="http">http</option>
                   <option value="https">https</option>
+                  <option value="socks5">socks5</option>
                 </select>
               </div>
               <div className="space-y-1.5 md:col-span-2">
