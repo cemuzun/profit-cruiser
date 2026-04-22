@@ -1,17 +1,13 @@
-// Client-side data source backed by static JSON served from the VPS scraper
-// (Caddy at https://187-124-69-23.sslip.io/data/*.json) plus localStorage for
-// user-owned state (watchlist, cost overrides, global settings).
-//
-// All previous pages used `supabase.from(...).select()` against Lovable Cloud.
-// They now go through this module instead. Lovable Cloud is no longer involved
-// in scraping or reads; this file is the single source of truth on the client.
+// Data source: reads from Lovable Cloud (Supabase) for scraped data,
+// and uses localStorage for user-owned state (watchlist, cost overrides,
+// global settings). Scraping is performed by the scrape-turo edge function
+// (Firecrawl-powered) and writes into the listings_current / snapshots /
+// price_forecasts / scrape_runs tables.
 
+import { supabase } from "@/integrations/supabase/client";
 import { DEFAULT_GLOBAL, type GlobalCosts, type AcquisitionMode } from "./profitability";
 
-const DATA_BASE = (import.meta.env.VITE_DATA_BASE_URL as string | undefined)?.replace(/\/+$/, "")
-  ?? "https://187-124-69-23.sslip.io";
-
-// ---------- Types mirroring the JSON shape produced by scraper.mjs ----------
+// ---------- Types mirroring DB rows ----------
 export type Listing = {
   vehicle_id: string;
   city: string;
@@ -76,33 +72,121 @@ export type ScrapeRun = {
   finished_at: string | null;
 };
 
-// ---------- Cached fetchers (module-level memoization) ----------
-const cache = new Map<string, Promise<any>>();
+export type City = {
+  slug: string;
+  name: string;
+  country: string;
+  region: string | null;
+  latitude: number;
+  longitude: number;
+  place_id: string | null;
+  active: boolean;
+};
 
-function fetchJson<T>(file: string): Promise<T> {
-  if (!cache.has(file)) {
-    cache.set(
-      file,
-      fetch(`${DATA_BASE}/data/${file}`, { cache: "no-store" })
-        .then(r => {
-          if (!r.ok) throw new Error(`Failed to load ${file}: ${r.status}`);
-          return r.json();
-        })
-        .catch(e => {
-          // Don't poison the cache on failure — let next call retry.
-          cache.delete(file);
-          throw e;
-        }),
-    );
+// ---------- Supabase-backed reads ----------
+async function fetchAllListings(): Promise<Listing[]> {
+  const PAGE = 1000;
+  let from = 0;
+  const all: Listing[] = [];
+  while (true) {
+    const { data, error } = await supabase
+      .from("listings_current")
+      .select("*")
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    all.push(...(data as Listing[]));
+    if (data.length < PAGE) break;
+    from += PAGE;
   }
-  return cache.get(file) as Promise<T>;
+  return all;
+}
+
+async function fetchSnapshots(): Promise<Snapshot[]> {
+  // Limit to last 90 days to stay manageable
+  const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const PAGE = 1000;
+  let from = 0;
+  const all: Snapshot[] = [];
+  while (true) {
+    const { data, error } = await supabase
+      .from("listings_snapshots")
+      .select("vehicle_id, city, make, model, year, vehicle_type, fuel_type, avg_daily_price, completed_trips, scraped_at")
+      .gte("scraped_at", since)
+      .order("scraped_at", { ascending: false })
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    all.push(...(data as Snapshot[]));
+    if (data.length < PAGE) break;
+    from += PAGE;
+  }
+  return all;
+}
+
+async function fetchForecasts(): Promise<Forecast[]> {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("price_forecasts")
+    .select("*")
+    .gte("scraped_at", since)
+    .order("scraped_at", { ascending: false })
+    .limit(5000);
+  if (error) throw error;
+  return (data ?? []) as Forecast[];
+}
+
+async function fetchRuns(): Promise<ScrapeRun[]> {
+  const { data, error } = await supabase
+    .from("scrape_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(50);
+  if (error) throw error;
+  return (data ?? []) as ScrapeRun[];
+}
+
+async function fetchCities(): Promise<City[]> {
+  const { data, error } = await supabase
+    .from("cities")
+    .select("*")
+    .order("name");
+  if (error) throw error;
+  return (data ?? []) as City[];
 }
 
 export const ds = {
-  listings: () => fetchJson<Listing[]>("listings.json"),
-  snapshots: () => fetchJson<Snapshot[]>("snapshots.json"),
-  forecasts: () => fetchJson<Forecast[]>("forecasts.json"),
-  runs: () => fetchJson<ScrapeRun[]>("runs.json"),
+  listings: () => fetchAllListings(),
+  snapshots: () => fetchSnapshots(),
+  forecasts: () => fetchForecasts(),
+  runs: () => fetchRuns(),
+  cities: () => fetchCities(),
+
+  async addCity(city: Omit<City, "active"> & { active?: boolean }) {
+    const { error } = await supabase.from("cities").insert({
+      ...city,
+      active: city.active ?? true,
+    });
+    if (error) throw error;
+  },
+  async removeCity(slug: string) {
+    const { error } = await supabase.from("cities").delete().eq("slug", slug);
+    if (error) throw error;
+  },
+  async setCityActive(slug: string, active: boolean) {
+    const { error } = await supabase
+      .from("cities")
+      .update({ active })
+      .eq("slug", slug);
+    if (error) throw error;
+  },
+  async triggerScrape(citySlug?: string) {
+    const { data, error } = await supabase.functions.invoke("scrape-turo", {
+      body: citySlug ? { city: citySlug } : { all: true },
+    });
+    if (error) throw error;
+    return data;
+  },
 };
 
 // ---------- LocalStorage-backed user state ----------
@@ -144,7 +228,6 @@ export type CostOverrideRecord = {
 };
 
 export const userStore = {
-  // ----- Watchlist -----
   getWatchlist(): WatchEntry[] {
     return readLS<WatchEntry[]>(LS_WATCHLIST, []);
   },
@@ -161,7 +244,6 @@ export const userStore = {
     writeLS(LS_WATCHLIST, this.getWatchlist().filter(w => w.vehicle_id !== id));
   },
 
-  // ----- Per-car cost overrides -----
   getOverrides(): Record<string, CostOverrideRecord> {
     return readLS<Record<string, CostOverrideRecord>>(LS_OVERRIDES, {});
   },
@@ -174,7 +256,6 @@ export const userStore = {
     writeLS(LS_OVERRIDES, all);
   },
 
-  // ----- Global cost settings -----
   getGlobal(): GlobalCosts {
     return readLS<GlobalCosts>(LS_GLOBAL, DEFAULT_GLOBAL);
   },

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,17 +19,17 @@ import {
 import { fmtUSD, fmtPct } from "@/lib/profitability";
 import { TrendingUp, TrendingDown, Calendar, Database } from "lucide-react";
 import { format } from "date-fns";
-
-const CITY_OPTIONS = [
-  { value: "all", label: "All cities" },
-  { value: "los-angeles", label: "Los Angeles" },
-  { value: "miami", label: "Miami" },
-  { value: "honolulu", label: "Honolulu" },
-];
+import { ds } from "@/lib/dataSource";
 
 export default function Seasonality() {
   const [city, setCity] = useState("all");
   const [makeModel, setMakeModel] = useState("");
+
+  const { data: cityList } = useQuery({ queryKey: ["cities"], queryFn: () => ds.cities() });
+  const CITY_OPTIONS = useMemo(
+    () => [{ value: "all", label: "All cities" }, ...(cityList ?? []).map(c => ({ value: c.slug, label: c.name }))],
+    [cityList],
+  );
 
   const [make, model] = useMemo(() => {
     const t = makeModel.trim();

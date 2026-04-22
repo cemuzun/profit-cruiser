@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ds } from "@/lib/dataSource";
+
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ import { Calculator } from "lucide-react";
 
 export default function Analyzer() {
   const { data: globalCosts } = useGlobalCosts();
+  const { data: cityList } = useQuery({ queryKey: ["cities"], queryFn: () => ds.cities() });
   const [make, setMake] = useState("Tesla");
   const [model, setModel] = useState("Model 3");
   const [year, setYear] = useState(2022);
@@ -79,9 +81,9 @@ export default function Analyzer() {
               <Select value={city} onValueChange={setCity}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="los-angeles">Los Angeles</SelectItem>
-                  <SelectItem value="miami">Miami</SelectItem>
-                  <SelectItem value="honolulu">Honolulu</SelectItem>
+                  {(cityList ?? []).map(c => (
+                    <SelectItem key={c.slug} value={c.slug}>{c.name}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
@@ -97,7 +99,7 @@ export default function Analyzer() {
           <>
             {!stats ? (
               <Card><CardContent className="pt-4 text-sm text-muted-foreground">
-                No comparable listings found in our database for {make} {model} in {city}. The VPS scraper publishes fresh data every 12h — check back after the next run.
+                No comparable listings found in our database for {make} {model} in {city}. Trigger a scrape from the dashboard or wait for the next daily auto-refresh.
               </CardContent></Card>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

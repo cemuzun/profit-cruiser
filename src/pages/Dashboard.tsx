@@ -20,13 +20,7 @@ import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
 } from "recharts";
 import { format } from "date-fns";
-
-const CITY_OPTIONS = [
-  { value: "all", label: "All cities" },
-  { value: "los-angeles", label: "Los Angeles" },
-  { value: "miami", label: "Miami" },
-  { value: "honolulu", label: "Honolulu" },
-];
+import { CitiesManager } from "@/components/CitiesManager";
 
 export default function Dashboard() {
   const [city, setCity] = useState("all");
@@ -35,6 +29,16 @@ export default function Dashboard() {
   const [sortBy, setSortBy] = useState<"profit" | "price" | "trips" | "rating">("profit");
 
   const { data: globalCosts } = useGlobalCosts();
+
+  const { data: cityList } = useQuery({
+    queryKey: ["cities"],
+    queryFn: () => ds.cities(),
+  });
+
+  const cityOptions = useMemo(
+    () => [{ value: "all", label: "All cities" }, ...(cityList ?? []).map(c => ({ value: c.slug, label: c.name }))],
+    [cityList],
+  );
 
   const { data: listings, isLoading } = useQuery({
     queryKey: ["listings-current"],
@@ -125,18 +129,20 @@ export default function Dashboard() {
           <div>
             <h1 className="text-2xl font-bold">Market Dashboard</h1>
             <p className="text-sm text-muted-foreground">
-              Most profitable Turo cars in LA, Miami & Honolulu, ranked by estimated monthly profit. Data refreshed every 12h by the VPS scraper.
+              Most profitable Turo cars across your active markets, ranked by estimated monthly profit. Auto-refreshed daily, or run manually below.
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Select value={city} onValueChange={setCity}>
               <SelectTrigger className="w-[180px]"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {CITY_OPTIONS.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
+                {cityOptions.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
         </div>
+
+        <CitiesManager />
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi icon={CarIcon} label="Listings tracked" value={kpis?.count ?? 0} />
@@ -230,7 +236,7 @@ export default function Dashboard() {
               <div className="py-12 text-center text-muted-foreground"><Loader2 className="h-5 w-5 animate-spin inline" /></div>
             ) : enriched.length === 0 ? (
               <div className="py-16 text-center space-y-3">
-                <p className="text-muted-foreground">No listings yet. The VPS scraper publishes data every 12 h (08:00 & 20:00 UTC).</p>
+                <p className="text-muted-foreground">No listings yet — click <strong>Run all active</strong> above to start your first scrape, or wait for the daily auto-refresh at 09:00 UTC.</p>
               </div>
             ) : (
               <div className="rounded-md border overflow-x-auto">
