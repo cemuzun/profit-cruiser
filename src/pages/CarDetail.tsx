@@ -335,8 +335,8 @@ export default function CarDetail() {
                 <Field label="Avg miles per day" value={form.avg_miles_per_day} onChange={(v) => setForm({ ...form, avg_miles_per_day: v })} />
               </div>
               {form.avg_miles_per_day != null && Number(form.avg_miles_per_day) > 0 && form.avg_miles_per_trip != null && Number(form.avg_miles_per_trip) > 0 && (
-                <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-                  Both <strong>Avg miles per day</strong> and <strong>Avg miles per trip</strong> are set. <strong>Per day takes precedence</strong> — per trip is ignored until you clear the per-day field.
+                <div className="mt-2 rounded-md border border-border bg-muted px-3 py-2 text-xs text-muted-foreground">
+                  Both <strong className="text-foreground">Avg miles per day</strong> and <strong className="text-foreground">Avg miles per trip</strong> are set. <strong className="text-foreground">Per day takes precedence</strong> — per trip is ignored until you clear the per-day field.
                 </div>
               )}
               <p className="text-xs text-muted-foreground mt-2">
