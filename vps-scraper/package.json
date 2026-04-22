@@ -6,7 +6,8 @@
   "scripts": {
     "scrape": "node scraper.mjs",
     "test:scrape": "node test-scrape.mjs",
-    "debug:scraperapi": "node debug-scraperapi.mjs"
+    "debug:scraperapi": "node debug-scraperapi.mjs",
+    "discover:xhr": "node discover-xhr.mjs"
   },
   "dependencies": {
     "pg": "^8.13.1",
