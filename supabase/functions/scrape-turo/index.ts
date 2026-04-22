@@ -575,6 +575,17 @@ Deno.serve(async (req) => {
     results[city.slug] = await scrapeCity(supa, city);
   }
 
+  // If every city failed, surface a top-level error so the UI can alert.
+  const failed = Object.entries(results).filter(([, r]: any) => r?.error);
+  const allFailed = failed.length === cities.length;
+  if (allFailed) {
+    const firstErr = (failed[0]?.[1] as any)?.error ?? "Scrape failed";
+    return new Response(
+      JSON.stringify({ ok: false, error: firstErr, results }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
+  }
+
   return new Response(JSON.stringify({ ok: true, results }), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
