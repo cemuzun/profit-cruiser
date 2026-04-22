@@ -11,6 +11,10 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict, type CostOverride, type AcquisitionMode } from "@/lib/profitability";
 import { turoCarUrl } from "@/lib/utils";
+import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink, Download } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
+
 function PriceTile({ label, value }: { label: string; value: number | null | undefined }) {
   return (
     <div className="border border-border rounded-md p-2">
