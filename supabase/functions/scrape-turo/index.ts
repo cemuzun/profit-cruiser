@@ -1,7 +1,6 @@
-// Turo scraper edge function — uses Firecrawl to fetch search pages
-// (Firecrawl handles Cloudflare + proxies for us), extracts the JSON
-// Turo embeds in __NEXT_DATA__, normalises vehicle records, and writes
-// them to listings_current / listings_snapshots / price_forecasts.
+// Turo scraper edge function — uses Geonix residential proxy ONLY.
+// No Firecrawl fallback: if Geonix fails, the run fails loudly so the
+// UI can show an alert.
 //
 // Trigger:
 //   POST /scrape-turo                          → all active cities
@@ -16,8 +15,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
-const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL"); // http://user:pass@host:port
+const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -25,50 +23,21 @@ const UAS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
 ];
-const pickUA = () => UAS[Math.floor(Math.random() * UAS.length)];
-const randSession = () => Math.random().toString(36).slice(2, 10);
+const LOCALES = ["en-US,en;q=0.9", "en-GB,en;q=0.9"];
+const pick = <T>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
+const rand = () => Math.random().toString(36).slice(2, 10);
 
-function buildProxyWithSession(): string | null {
+function buildProxyWithSession(sessionId: string): string | null {
   if (!GEONIX_PROXY_URL) return null;
   try {
     const u = new URL(GEONIX_PROXY_URL);
     const user = decodeURIComponent(u.username);
-    u.username = encodeURIComponent(`${user}-session-${randSession()}`);
+    u.username = encodeURIComponent(`${user}-session-${sessionId}`);
     return u.toString();
   } catch {
     return GEONIX_PROXY_URL;
   }
-}
-
-async function geonixFetch(url: string, expectJson: boolean): Promise<{ html?: string; json?: any } | null> {
-  const proxy = buildProxyWithSession();
-  if (!proxy) return null;
-  const headers: Record<string, string> = {
-    "User-Agent": pickUA(),
-    "Accept": expectJson ? "application/json, text/plain, */*" : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://turo.com/us/en/search",
-  };
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      // @ts-ignore Deno.createHttpClient is available in the edge runtime
-      const client = Deno.createHttpClient({ proxy: { url: proxy } });
-      const res = await fetch(url, { headers, client, signal: AbortSignal.timeout(30000) } as any);
-      const text = await res.text();
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      if (expectJson) {
-        try { return { json: JSON.parse(text) }; } catch { return { html: text }; }
-      }
-      return { html: text };
-    } catch (e) {
-      console.log(`geonix attempt ${attempt} failed: ${e instanceof Error ? e.message : e}`);
-      if (attempt === 3) return null;
-      await new Promise((r) => setTimeout(r, 600 * attempt));
-    }
-  }
-  return null;
 }
 
 type City = {
@@ -316,44 +285,60 @@ function findObjectEnd(s: string, fromIdx: number): number {
   return -1;
 }
 
-async function firecrawlFetch(url: string, expectJson: boolean): Promise<{ html?: string; json?: any } | null> {
-  const resp = await fetch("https://api.firecrawl.dev/v2/scrape", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      url,
-      formats: ["rawHtml"],
-      onlyMainContent: false,
-      waitFor: expectJson ? 0 : 4000,
-      location: { country: "US", languages: ["en"] },
-    }),
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    console.error(`Firecrawl ${resp.status}: ${text.slice(0, 300)}`);
-    return null;
-  }
-  const data = await resp.json();
-  const raw = data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? null;
-  if (!raw) return null;
-  if (expectJson) {
-    // The API endpoint returns JSON; Firecrawl wraps it in <html><body><pre>...</pre></body></html>
-    const stripped = raw.replace(/<[^>]+>/g, "").trim();
-    try {
-      return { json: JSON.parse(stripped) };
-    } catch {
-      // Sometimes the JSON sits inside a <pre> tag — try a more targeted match
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) {
-        try { return { json: JSON.parse(m[0]) }; } catch {}
+// Geonix-proxied fetch with rotating session + UA. Throws on failure.
+async function geonixFetch(
+  url: string,
+  expectJson: boolean,
+  attempt = 1,
+): Promise<{ html?: string; json?: any }> {
+  const sessionId = rand();
+  const proxy = buildProxyWithSession(sessionId);
+  if (!proxy) throw new Error("GEONIX_PROXY_URL not configured");
+
+  const headers: Record<string, string> = {
+    "User-Agent": pick(UAS),
+    "Accept": expectJson
+      ? "application/json, text/plain, */*"
+      : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": pick(LOCALES),
+    "Referer": "https://turo.com/us/en/search",
+  };
+  if (expectJson) headers["x-requested-with"] = "XMLHttpRequest";
+
+  try {
+    const init: RequestInit & { client?: Deno.HttpClient } = {
+      headers,
+      signal: AbortSignal.timeout(30000),
+    };
+    // @ts-ignore - createHttpClient is available in Deno Deploy edge runtime
+    const client = Deno.createHttpClient({ proxy: { url: proxy } });
+    init.client = client;
+
+    const res = await fetch(url, init);
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+
+    if (expectJson) {
+      try {
+        return { json: JSON.parse(text) };
+      } catch {
+        const m = text.match(/\{[\s\S]*\}/);
+        if (m) {
+          try { return { json: JSON.parse(m[0]) }; } catch {}
+        }
+        throw new Error("Geonix returned non-JSON for API endpoint");
       }
-      return { html: raw };
     }
+    return { html: text };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log(`geonix attempt ${attempt} failed: ${msg}`);
+    if (attempt < 3) {
+      await new Promise((r) => setTimeout(r, 600 * attempt));
+      return geonixFetch(url, expectJson, attempt + 1);
+    }
+    throw new Error(`Geonix fetch failed after 3 attempts: ${msg}`);
   }
-  return { html: raw };
 }
 
 async function scrapeCity(
@@ -376,44 +361,39 @@ async function scrapeCity(
     for (const win of WINDOWS) {
       let vehicles: any[] = [];
 
-      // Strategy A: hit Turo's JSON API directly via Geonix residential proxy (preferred)
+      // Strategy A: hit Turo's JSON API directly via Geonix
       const apiUrl = buildApiSearchUrl(city, win);
       console.log(`[${city.slug}/${win.key}] API(geonix) ${apiUrl.slice(0, 110)}...`);
-      let apiResp = await geonixFetch(apiUrl, true);
-
-      // Strategy A2: if Geonix failed/unavailable, try Firecrawl
-      if (!apiResp?.json && FIRECRAWL_API_KEY) {
-        console.log(`  → falling back to Firecrawl for API`);
-        apiResp = await firecrawlFetch(apiUrl, true);
-      }
-      if (apiResp?.json) {
-        vehicles = extractFromJson(apiResp.json);
-        console.log(`  → API: ${vehicles.length} vehicles`);
-      } else {
-        console.log(`  → API: no JSON returned`);
+      try {
+        const apiResp = await geonixFetch(apiUrl, true);
+        if (apiResp.json) {
+          vehicles = extractFromJson(apiResp.json);
+          console.log(`  → API: ${vehicles.length} vehicles`);
+        }
+      } catch (e) {
+        console.log(`  → API failed: ${e instanceof Error ? e.message : e}`);
       }
 
-      // Strategy B: HTML search page fallback (Geonix first, then Firecrawl)
+      // Strategy B: scrape the HTML search page via Geonix if API yielded nothing
       if (vehicles.length === 0) {
         const htmlUrl = buildSearchUrl(city, win);
         console.log(`[${city.slug}/${win.key}] HTML(geonix) ${htmlUrl.slice(0, 100)}...`);
-        let htmlResp = await geonixFetch(htmlUrl, false);
-        if (!htmlResp?.html && FIRECRAWL_API_KEY) {
-          console.log(`  → falling back to Firecrawl for HTML`);
-          htmlResp = await firecrawlFetch(htmlUrl, false);
-        }
-        const html = htmlResp?.html;
-        if (html) {
-          const next = extractNextData(html);
-          if (next) vehicles = extractFromJson(next);
-          if (vehicles.length === 0) vehicles = extractFromNextStreaming(html);
-          if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
-          console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
-
-          if (vehicles.length === 0) {
-            const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
-            console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
+        try {
+          const htmlResp = await geonixFetch(htmlUrl, false);
+          const html = htmlResp.html;
+          if (html) {
+            const next = extractNextData(html);
+            if (next) vehicles = extractFromJson(next);
+            if (vehicles.length === 0) vehicles = extractFromNextStreaming(html);
+            if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
+            console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
+            if (vehicles.length === 0) {
+              const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
+              console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
+            }
           }
+        } catch (e) {
+          console.log(`  → HTML failed: ${e instanceof Error ? e.message : e}`);
         }
       }
 
@@ -515,6 +495,10 @@ async function scrapeCity(
       }
     }
 
+    if (currentRows.length === 0) {
+      throw new Error("Geonix proxy returned 0 vehicles across all windows. Check GEONIX_PROXY_URL credentials/quota or Turo blocked the proxy.");
+    }
+
     if (runId) {
       await supa
         .from("scrape_runs")
@@ -550,9 +534,9 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  if (!FIRECRAWL_API_KEY && !GEONIX_PROXY_URL) {
+  if (!GEONIX_PROXY_URL) {
     return new Response(
-      JSON.stringify({ error: "Neither GEONIX_PROXY_URL nor FIRECRAWL_API_KEY is configured" }),
+      JSON.stringify({ error: "GEONIX_PROXY_URL not configured. Add it in Backend → Secrets." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
@@ -589,6 +573,17 @@ Deno.serve(async (req) => {
   const results: Record<string, any> = {};
   for (const city of cities) {
     results[city.slug] = await scrapeCity(supa, city);
+  }
+
+  // If every city failed, surface a top-level error so the UI can alert.
+  const failed = Object.entries(results).filter(([, r]: any) => r?.error);
+  const allFailed = failed.length === cities.length;
+  if (allFailed) {
+    const firstErr = (failed[0]?.[1] as any)?.error ?? "Scrape failed";
+    return new Response(
+      JSON.stringify({ ok: false, error: firstErr, results }),
+      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   return new Response(JSON.stringify({ ok: true, results }), {
