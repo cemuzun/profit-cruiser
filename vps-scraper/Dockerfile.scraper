@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cron tini \
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev
 
-# Copy app
-COPY scraper.mjs dump.mjs test-scrape.mjs debug-scraperapi.mjs ./
+# Copy app (all .mjs files + any helpers)
+COPY *.mjs ./
 
 # Cron config — runs every 12h, plus an initial run 60s after boot via entrypoint
 COPY crontab /etc/cron.d/turo-scraper
