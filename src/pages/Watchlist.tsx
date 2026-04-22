@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
+import { turoCarUrl } from "@/lib/utils";
 import { VerdictBadge } from "./Dashboard";
 import { Trash2, ExternalLink, GitCompare } from "lucide-react";
 
@@ -81,11 +82,28 @@ export default function Watchlist() {
                         aria-label="Select to compare"
                       />
                       <div className="flex-1">
-                        {c.image_url && <img src={c.image_url} alt="" className="w-full h-32 object-cover rounded-md" />}
+                        {c.image_url && (
+                          <a
+                            href={turoCarUrl(c.vehicle_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Open on Turo"
+                          >
+                            <img src={c.image_url} alt={`${c.year ?? ""} ${c.make ?? ""} ${c.model ?? ""}`.trim()} className="w-full h-32 object-cover rounded-md hover:opacity-80 transition" />
+                          </a>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center justify-between">
-                      <div className="font-semibold">{c.year} {c.make} {c.model}</div>
+                      <a
+                        href={turoCarUrl(c.vehicle_id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-semibold hover:underline"
+                        title="Open on Turo"
+                      >
+                        {c.year} {c.make} {c.model}
+                      </a>
                       {v && <VerdictBadge tone={v.tone} label={v.label} />}
                     </div>
                     <div className="text-xs text-muted-foreground">{c.city} · {c.completed_trips ?? 0} trips · {c.rating?.toFixed(2) ?? "—"}★</div>

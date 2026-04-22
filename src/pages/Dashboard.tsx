@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/select";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
+import { turoCarUrl } from "@/lib/utils";
 import { Loader2, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
@@ -265,10 +266,25 @@ export default function Dashboard() {
                           <TableCell>
                             <div className="flex items-center gap-2">
                               {l.image_url && (
-                                <img src={l.image_url} alt="" className="h-8 w-12 object-cover rounded" loading="lazy" />
+                                <a
+                                  href={turoCarUrl(l.vehicle_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="Open on Turo"
+                                >
+                                  <img src={l.image_url} alt={`${l.year ?? ""} ${l.make ?? ""} ${l.model ?? ""}`.trim()} className="h-8 w-12 object-cover rounded hover:opacity-80 transition" loading="lazy" />
+                                </a>
                               )}
                               <div>
-                                <div className="font-medium">{l.year} {l.make} {l.model}</div>
+                                <a
+                                  href={turoCarUrl(l.vehicle_id)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="font-medium hover:underline"
+                                  title="Open on Turo"
+                                >
+                                  {l.year} {l.make} {l.model}
+                                </a>
                                 <div className="text-xs text-muted-foreground">{l.vehicle_type ?? "—"} · {l.fuel_type ?? "—"}</div>
                               </div>
                             </div>
