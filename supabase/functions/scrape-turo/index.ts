@@ -361,34 +361,39 @@ async function scrapeCity(
     for (const win of WINDOWS) {
       let vehicles: any[] = [];
 
-      // Strategy A: hit Turo's JSON API directly via Firecrawl
+      // Strategy A: hit Turo's JSON API directly via Geonix
       const apiUrl = buildApiSearchUrl(city, win);
-      console.log(`[${city.slug}/${win.key}] API ${apiUrl.slice(0, 110)}...`);
-      const apiResp = await firecrawlFetch(apiUrl, true);
-      if (apiResp?.json) {
-        vehicles = extractFromJson(apiResp.json);
-        console.log(`  → API: ${vehicles.length} vehicles`);
-      } else {
-        console.log(`  → API: no JSON returned`);
+      console.log(`[${city.slug}/${win.key}] API(geonix) ${apiUrl.slice(0, 110)}...`);
+      try {
+        const apiResp = await geonixFetch(apiUrl, true);
+        if (apiResp.json) {
+          vehicles = extractFromJson(apiResp.json);
+          console.log(`  → API: ${vehicles.length} vehicles`);
+        }
+      } catch (e) {
+        console.log(`  → API failed: ${e instanceof Error ? e.message : e}`);
       }
 
-      // Strategy B: fall back to scraping the HTML search page if API yielded nothing
+      // Strategy B: scrape the HTML search page via Geonix if API yielded nothing
       if (vehicles.length === 0) {
         const htmlUrl = buildSearchUrl(city, win);
-        console.log(`[${city.slug}/${win.key}] HTML fallback ${htmlUrl.slice(0, 100)}...`);
-        const htmlResp = await firecrawlFetch(htmlUrl, false);
-        const html = htmlResp?.html;
-        if (html) {
-          const next = extractNextData(html);
-          if (next) vehicles = extractFromJson(next);
-          if (vehicles.length === 0) vehicles = extractFromNextStreaming(html);
-          if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
-          console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
-
-          if (vehicles.length === 0) {
-            const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
-            console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
+        console.log(`[${city.slug}/${win.key}] HTML(geonix) ${htmlUrl.slice(0, 100)}...`);
+        try {
+          const htmlResp = await geonixFetch(htmlUrl, false);
+          const html = htmlResp.html;
+          if (html) {
+            const next = extractNextData(html);
+            if (next) vehicles = extractFromJson(next);
+            if (vehicles.length === 0) vehicles = extractFromNextStreaming(html);
+            if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
+            console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
+            if (vehicles.length === 0) {
+              const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
+              console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
+            }
           }
+        } catch (e) {
+          console.log(`  → HTML failed: ${e instanceof Error ? e.message : e}`);
         }
       }
 
