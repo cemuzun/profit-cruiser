@@ -139,7 +139,7 @@ function extractFromJson(root: any): any[] {
   return out;
 }
 
-// Try to extract __NEXT_DATA__ JSON blob from raw HTML
+// Try to extract __NEXT_DATA__ JSON blob from raw HTML (legacy Next.js)
 function extractNextData(html: string): any | null {
   const m = html.match(
     /<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
@@ -150,6 +150,84 @@ function extractNextData(html: string): any | null {
   } catch {
     return null;
   }
+}
+
+// Modern Next.js (app router) streams data via self.__next_f.push([1, "...json..."])
+// Concatenate all those payloads, then scan for vehicle-shaped JSON.
+function extractFromNextStreaming(html: string): any[] {
+  const re = /self\.__next_f\.push\(\s*\[\s*\d+\s*,\s*("(?:\\.|[^"\\])*")\s*\]\s*\)/g;
+  const chunks: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      const decoded = JSON.parse(m[1]); // unwrap the JS string literal
+      chunks.push(decoded);
+    } catch {}
+  }
+  if (chunks.length === 0) return [];
+  const blob = chunks.join("");
+  return extractVehiclesFromBlob(blob);
+}
+
+// Last-resort: scan raw HTML for embedded JSON objects that look like vehicles.
+function extractFromHtmlScan(html: string): any[] {
+  return extractVehiclesFromBlob(html);
+}
+
+// Find {...} substrings that contain vehicle-ish keys, parse, normalise.
+function extractVehiclesFromBlob(blob: string): any[] {
+  const out: any[] = [];
+  const seen = new Set<string>();
+  // Match top-level vehicle object snippets — heuristic: look for "vehicleId" or "avgDailyPrice"
+  const idRe = /"(?:vehicleId|id)"\s*:\s*"?(\d{5,})"?/g;
+  let m: RegExpExecArray | null;
+  while ((m = idRe.exec(blob)) !== null) {
+    // Find the surrounding {...} by walking back/forward balancing braces
+    const start = findObjectStart(blob, m.index);
+    if (start < 0) continue;
+    const end = findObjectEnd(blob, start);
+    if (end < 0) continue;
+    const candidate = blob.slice(start, end + 1);
+    try {
+      const obj = JSON.parse(candidate);
+      const v = normaliseVehicle(obj);
+      if (v && !seen.has(v.vehicle_id)) {
+        seen.add(v.vehicle_id);
+        out.push(v);
+      }
+    } catch {}
+    idRe.lastIndex = end + 1;
+  }
+  return out;
+}
+
+function findObjectStart(s: string, fromIdx: number): number {
+  let depth = 0;
+  for (let i = fromIdx; i >= 0; i--) {
+    const c = s[i];
+    if (c === "}") depth++;
+    else if (c === "{") {
+      if (depth === 0) return i;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+function findObjectEnd(s: string, fromIdx: number): number {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = fromIdx; i < s.length; i++) {
+    const c = s[i];
+    if (esc) { esc = false; continue; }
+    if (c === "\\") { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === "{") depth++;
+    else if (c === "}") { depth--; if (depth === 0) return i; }
+  }
+  return -1;
 }
 
 async function firecrawlScrape(url: string): Promise<string | null> {
@@ -199,9 +277,33 @@ async function scrapeCity(
       const html = await firecrawlScrape(url);
       if (!html) continue;
       segmentsRun++;
+
+      // Try multiple extraction strategies
+      let vehicles: any[] = [];
+
+      // 1. Legacy __NEXT_DATA__ blob
       const next = extractNextData(html);
-      const vehicles = next ? extractFromJson(next) : [];
-      console.log(`  → ${vehicles.length} vehicles`);
+      if (next) vehicles = extractFromJson(next);
+
+      // 2. Modern Next.js streaming chunks: self.__next_f.push([...,"...json..."])
+      if (vehicles.length === 0) {
+        vehicles = extractFromNextStreaming(html);
+      }
+
+      // 3. Inline JSON-LD or any embedded { "vehicleId": ... } shapes
+      if (vehicles.length === 0) {
+        vehicles = extractFromHtmlScan(html);
+      }
+
+      console.log(`  → ${vehicles.length} vehicles (htmlLen=${html.length}, hasNextData=${!!next})`);
+
+      // If still nothing, log a small HTML sample once per segment to diagnose
+      if (vehicles.length === 0) {
+        const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
+        const hasNextStreaming = /self\.__next_f\.push/.test(html);
+        console.log(`    diag: cfChallenge=${hasCfChallenge}, nextStreaming=${hasNextStreaming}, sample=${html.slice(0, 300).replace(/\s+/g, " ")}`);
+      }
+
       for (const v of vehicles) {
         const existing = merged.get(v.vehicle_id);
         if (existing) {
