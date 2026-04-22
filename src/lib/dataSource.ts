@@ -186,7 +186,14 @@ export const ds = {
     });
     if (error) throw new Error(error.message || "Scrape function failed");
     if (data && data.ok === false) {
-      throw new Error(data.error || "Scrape failed");
+      const detail = data?.diagnostics?.reason === "turo_blocked"
+        ? " Turo is blocking the current proxy IPs."
+        : data?.diagnostics?.reason === "proxy_auth_failed"
+          ? " Check proxy host, port, username, and password."
+          : data?.diagnostics?.reason === "proxy_tunnel_failed"
+            ? " The proxy tunnel could not be established."
+            : "";
+      throw new Error(`${data.error || "Scrape failed"}${detail}`);
     }
     // Surface partial failures (some cities errored)
     if (data?.results) {
