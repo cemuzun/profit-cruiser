@@ -34,7 +34,10 @@ export default function Settings() {
     queryFn: async () => ds.runs(),
   });
 
-  const set = (k: keyof GlobalCosts) => (e: any) => setForm({ ...form, [k]: Number(e.target.value) });
+  const set = (k: keyof GlobalCosts) => (e: any) => {
+    const raw = e.target.value;
+    setForm({ ...form, [k]: raw === "" ? (null as any) : Number(raw) });
+  };
   const setMode = (v: string) => setForm({ ...form, default_acquisition_mode: v as AcquisitionMode });
 
   return (
@@ -88,7 +91,8 @@ export default function Settings() {
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <Field label="Mileage cap / month" value={form.default_mileage_cap_monthly} onChange={set("default_mileage_cap_monthly")} hint="Typical lease: 12,000 mi/yr ≈ 1,000/mo. For buys, treat as the threshold beyond which extra wear hits." />
                 <Field label="Overage $/mile" value={form.default_mileage_overage_per_mi} onChange={set("default_mileage_overage_per_mi")} />
-                <Field label="Avg miles per trip" value={form.default_avg_miles_per_trip} onChange={set("default_avg_miles_per_trip")} />
+                <Field label="Avg miles per trip" value={form.default_avg_miles_per_trip} onChange={set("default_avg_miles_per_trip")} hint="Used when 'Avg miles per day' is empty. Estimated miles/mo = trips/mo × avg miles per trip." />
+                <Field label="Avg miles per day (optional)" value={form.default_avg_miles_per_day ?? ""} onChange={set("default_avg_miles_per_day" as any)} hint="If set, takes precedence over per-trip. Estimated miles/mo = 30 × utilization% × avg miles per day." />
               </div>
             </div>
             <div className="flex gap-2 pt-2">
@@ -124,7 +128,7 @@ export default function Settings() {
   );
 }
 
-function Field({ label, value, onChange, hint }: { label: string; value: number; onChange: (e: any) => void; hint?: string }) {
+function Field({ label, value, onChange, hint }: { label: string; value: number | string | null | undefined; onChange: (e: any) => void; hint?: string }) {
   return (
     <div>
       <Label className="flex items-center gap-1">
@@ -140,7 +144,7 @@ function Field({ label, value, onChange, hint }: { label: string; value: number;
           </TooltipProvider>
         )}
       </Label>
-      <Input type="number" value={value} onChange={onChange} />
+      <Input type="number" value={value ?? ""} onChange={onChange} />
     </div>
   );
 }
