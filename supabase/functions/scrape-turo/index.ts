@@ -299,10 +299,18 @@ async function runApify(
     `https://api.apify.com/v2/acts/${APIFY_ACTOR}/run-sync-get-dataset-items` +
     `?token=${encodeURIComponent(token)}&timeout=540&format=json`;
 
+  // apify/web-scraper input shape
   const input = {
     startUrls: searchUrls.map((u) => ({ url: u })),
-    searchUrls, // some actors accept this alternate shape
-    maxItems: 1000,
+    pageFunction: PAGE_FUNCTION,
+    proxyConfiguration: { useApifyProxy: true, apifyProxyGroups: ["RESIDENTIAL"] },
+    useChrome: true,
+    headless: true,
+    waitUntil: ["networkidle2"],
+    maxRequestRetries: 2,
+    pageLoadTimeoutSecs: 60,
+    maxPagesPerCrawl: searchUrls.length,
+    injectJQuery: false,
   };
 
   const res = await fetch(url, {
@@ -318,7 +326,14 @@ async function runApify(
   }
   try {
     const data = JSON.parse(text);
-    return Array.isArray(data) ? data : [];
+    if (!Array.isArray(data)) return [];
+    // web-scraper returns one dataset item per URL: { url, vehicles: [...] }
+    const out: any[] = [];
+    for (const item of data) {
+      if (Array.isArray(item?.vehicles)) out.push(...item.vehicles);
+      else if (item && typeof item === "object") out.push(item);
+    }
+    return out;
   } catch {
     throw new Error(`Apify returned non-JSON response: ${text.slice(0, 200)}`);
   }
