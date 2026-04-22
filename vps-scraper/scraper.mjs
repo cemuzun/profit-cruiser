@@ -352,7 +352,10 @@ async function fetchWithContext(browser, url, proxyConfig) {
 
     const via = proxyConfig ? `proxy ${proxyConfig.server}` : "direct";
     console.log(`    [${elapsed}ms] via ${via}: intercepted=${intercepted.length} blobs → ${vehicles.length} vehicles`);
-    return vehicles;
+    // Return both vehicles and how many API blobs were intercepted.
+    // intercepted.length === 0 means the IP was blocked (no API calls reached us).
+    // intercepted.length > 0 but vehicles === 0 means the segment is legitimately empty.
+    return { vehicles, interceptedCount: intercepted.length };
   } finally {
     await page.close().catch(() => {});
     await ctx.close().catch(() => {});
@@ -361,17 +364,27 @@ async function fetchWithContext(browser, url, proxyConfig) {
 
 // ---------- Stealth Playwright fetch with proxy fallback ----------
 // 1st try: direct VPS IP (free, fast).
-// If 0 vehicles returned (IP blocked), automatically retry with the next proxy
-// from the pool in round-robin order.
+// Proxy fallback only fires when the page is BLOCKED (0 API blobs intercepted),
+// NOT when the segment is legitimately empty (API responded but 0 vehicles matched).
 async function stealthFetch(browser, url) {
   // Always try direct first
+  let directBlocked = false;
   try {
-    const vehicles = await fetchWithContext(browser, url, null);
-    if (vehicles.length > 0) return vehicles;
-    console.log(`    Direct returned 0 vehicles — trying proxy fallback...`);
+    const { vehicles, interceptedCount } = await fetchWithContext(browser, url, null);
+    if (interceptedCount > 0) {
+      // API responded — return result whether vehicles is 0 or not.
+      // A legitimate empty segment (e.g. $0-50) won't waste proxy requests.
+      return vehicles;
+    }
+    // interceptedCount === 0 means no API calls reached us → IP is blocked
+    directBlocked = true;
+    console.log(`    Direct blocked (no API intercepted) — trying proxy fallback...`);
   } catch (e) {
+    directBlocked = true;
     console.warn(`    Direct attempt failed (${e.message}) — trying proxy fallback...`);
   }
+
+  if (!directBlocked) return [];
 
   // Proxy fallback — try each proxy once in round-robin
   if (PROXIES.length === 0) {
@@ -379,17 +392,15 @@ async function stealthFetch(browser, url) {
     return [];
   }
 
-  const startIdx = proxyIndex;
   for (let i = 0; i < PROXIES.length; i++) {
     const proxy = PROXIES[proxyIndex % PROXIES.length];
     proxyIndex = (proxyIndex + 1) % PROXIES.length;
     try {
-      const vehicles = await fetchWithContext(browser, url, proxy);
-      if (vehicles.length > 0) return vehicles;
+      const { vehicles, interceptedCount } = await fetchWithContext(browser, url, proxy);
+      if (interceptedCount > 0) return vehicles; // proxy worked (even if 0 vehicles)
     } catch (e) {
       console.warn(`    Proxy ${proxy.server} failed: ${e.message}`);
     }
-    if (proxyIndex === startIdx) break; // cycled through all
   }
 
   return [];
