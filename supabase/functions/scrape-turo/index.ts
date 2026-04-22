@@ -22,8 +22,118 @@ const APIFY_API_TOKEN = Deno.env.get("APIFY_API_TOKEN");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-// Apify actor ID — slashes must be replaced with `~` in the REST API path.
-const APIFY_ACTOR = "backhoe~turo-daily-pricing-parser";
+// Apify actor ID — using the generic Web Scraper (apify/web-scraper).
+// Actor ID `moJRLRc85AitArpNN` is the public ID for apify/web-scraper.
+const APIFY_ACTOR = "moJRLRc85AitArpNN";
+
+// Page function executed inside the headless browser for each Turo search URL.
+// It scans __NEXT_DATA__, the streaming __next_f chunks, and raw HTML for
+// vehicle-shaped JSON objects and pushes a flat array of normalised vehicles.
+const PAGE_FUNCTION = `
+async function pageFunction(context) {
+  const { request, page, log } = context;
+  // Wait briefly for hydration / streaming chunks to arrive
+  try { await page.waitForSelector('script', { timeout: 8000 }); } catch (e) {}
+  await new Promise(r => setTimeout(r, 2500));
+
+  const html = await page.content();
+
+  function normaliseVehicle(node) {
+    if (!node || typeof node !== 'object') return null;
+    const id = node.id || node.vehicleId || (node.vehicle && node.vehicle.id);
+    const rawPrice = node.avgDailyPrice || node.dailyPrice || node.dailyPriceWithCurrency
+      || (node.dailyPricing && node.dailyPricing.dailyPrice) || node.price;
+    const price = rawPrice && typeof rawPrice === 'object' ? rawPrice.amount : rawPrice;
+    const make = node.make || (node.vehicle && node.vehicle.make) || node.makeName;
+    const model = node.model || (node.vehicle && node.vehicle.model) || node.modelName;
+    if (!id || price == null || (!make && !model)) return null;
+    return {
+      vehicle_id: String(id),
+      make: make || null,
+      model: model || null,
+      year: Number(node.year || (node.vehicle && node.vehicle.year)) || null,
+      trim: node.trim || (node.vehicle && node.vehicle.trim) || null,
+      vehicle_type: node.type || node.seoCategory || node.vehicleType || (node.vehicle && node.vehicle.type) || null,
+      fuel_type: node.fuelType || (node.vehicle && node.vehicle.fuelType) || null,
+      avg_daily_price: Number(price) || null,
+      completed_trips: Number(node.completedTrips || node.numberOfTrips || node.tripsTaken) || 0,
+      rating: Number(node.rating || node.hostRating || node.avgRating) || null,
+      is_all_star_host: Boolean(node.isAllStarHost || (node.host && node.host.isAllStarHost)),
+      host_id: (node.hostId || (node.host && node.host.id)) ? String(node.hostId || node.host.id) : null,
+      host_name: node.hostName || (node.host && node.host.firstName) || null,
+      image_url: (node.images && (node.images[0] && (node.images[0].originalImageUrl || node.images[0].url)))
+        || (node.imageUrls && node.imageUrls[0])
+        || (node.image && node.image.originalImageUrl) || null,
+      location_city: (node.location && node.location.city) || node.locationCity || null,
+      location_state: (node.location && node.location.state) || node.locationState || null,
+      latitude: Number((node.location && node.location.latitude) || node.latitude) || null,
+      longitude: Number((node.location && node.location.longitude) || node.longitude) || null,
+    };
+  }
+
+  function walk(v, out, seen, depth) {
+    if (depth > 12 || v == null) return;
+    if (Array.isArray(v)) { for (const x of v) walk(x, out, seen, depth + 1); return; }
+    if (typeof v === 'object') {
+      const n = normaliseVehicle(v);
+      if (n && !seen.has(n.vehicle_id)) { seen.add(n.vehicle_id); out.push(n); }
+      for (const k in v) walk(v[k], out, seen, depth + 1);
+    }
+  }
+
+  const out = [];
+  const seen = new Set();
+
+  // 1) __NEXT_DATA__
+  const nd = html.match(/<script[^>]+id=\\"__NEXT_DATA__\\"[^>]*>([\\s\\S]*?)<\\/script>/);
+  if (nd) { try { walk(JSON.parse(nd[1]), out, seen, 0); } catch (e) {} }
+
+  // 2) streaming __next_f chunks
+  const re = /self\\.__next_f\\.push\\(\\s*\\[\\s*\\d+\\s*,\\s*("(?:\\\\.|[^"\\\\])*")\\s*\\]\\s*\\)/g;
+  const chunks = [];
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    try { chunks.push(JSON.parse(m[1])); } catch (e) {}
+  }
+  if (chunks.length) {
+    const blob = chunks.join('');
+    // Look for embedded JSON vehicle objects
+    const idRe = /"(?:vehicleId|id)"\\s*:\\s*"?(\\d{5,})"?/g;
+    let mm;
+    while ((mm = idRe.exec(blob)) !== null) {
+      // walk back to find {
+      let start = -1, depth = 0;
+      for (let i = mm.index; i >= 0; i--) {
+        const c = blob[i];
+        if (c === '}') depth++;
+        else if (c === '{') { if (depth === 0) { start = i; break; } depth--; }
+      }
+      if (start < 0) continue;
+      // walk forward to matching }
+      let end = -1, d = 0, inStr = false, esc = false;
+      for (let i = start; i < blob.length; i++) {
+        const c = blob[i];
+        if (esc) { esc = false; continue; }
+        if (c === '\\\\') { esc = true; continue; }
+        if (c === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (c === '{') d++;
+        else if (c === '}') { d--; if (d === 0) { end = i; break; } }
+      }
+      if (end < 0) continue;
+      try {
+        const obj = JSON.parse(blob.slice(start, end + 1));
+        const n = normaliseVehicle(obj);
+        if (n && !seen.has(n.vehicle_id)) { seen.add(n.vehicle_id); out.push(n); }
+      } catch (e) {}
+      idRe.lastIndex = end + 1;
+    }
+  }
+
+  log.info('Extracted ' + out.length + ' vehicles from ' + request.url);
+  return { url: request.url, vehicles: out };
+}
+`;
 
 type FailureReason =
   | "apify_not_configured"
