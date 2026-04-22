@@ -28,15 +28,16 @@ const LOCALES = ["en-US,en;q=0.9", "en-GB,en;q=0.9"];
 const pick = <T>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
 const rand = () => Math.random().toString(36).slice(2, 10);
 
-function buildProxyWithSession(sessionId: string): string | null {
+function buildProxyUrl(): string | null {
   if (!GEONIX_PROXY_URL) return null;
   try {
     const u = new URL(GEONIX_PROXY_URL);
-    const user = decodeURIComponent(u.username);
-    u.username = encodeURIComponent(`${user}-session-${sessionId}`);
+    if (!u.protocol || !u.hostname || !u.username || !u.password) {
+      throw new Error("Incomplete proxy URL");
+    }
     return u.toString();
   } catch {
-    return GEONIX_PROXY_URL;
+    throw new Error("Invalid GEONIX_PROXY_URL format. Expected http://username:password@host:port");
   }
 }
 
@@ -291,8 +292,7 @@ async function geonixFetch(
   expectJson: boolean,
   attempt = 1,
 ): Promise<{ html?: string; json?: any }> {
-  const sessionId = rand();
-  const proxy = buildProxyWithSession(sessionId);
+  const proxy = buildProxyUrl();
   if (!proxy) throw new Error("GEONIX_PROXY_URL not configured");
 
   const headers: Record<string, string> = {
