@@ -459,12 +459,22 @@ async function scrapeSegment(browser, citySlug, win, minP, maxP, vt) {
 }
 
 // ---------- Per-city orchestration ----------
-async function scrapeCity(browser, citySlug) {
-  const runIns = await pool.query(
-    "insert into scrape_runs (city, status) values ($1, 'running') returning id",
-    [citySlug],
-  );
-  const runId = runIns.rows[0].id;
+// If `existingRunId` is provided we update that row instead of creating a new
+// one — used by the queue worker that consumes 'pending' scrape_runs entries.
+async function scrapeCity(browser, citySlug, existingRunId = null) {
+  let runId = existingRunId;
+  if (runId) {
+    await pool.query(
+      "update scrape_runs set status='running', started_at=now() where id=$1",
+      [runId],
+    );
+  } else {
+    const runIns = await pool.query(
+      "insert into scrape_runs (city, status) values ($1, 'running') returning id",
+      [citySlug],
+    );
+    runId = runIns.rows[0].id;
+  }
   console.log(`▶ ${citySlug} (run ${runId})`);
 
   const vehicles = new Map(); // id -> { base, windows: { key: { sum, count, min, max } } }
