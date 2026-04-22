@@ -253,114 +253,75 @@ if (PROXIES.length > 0) {
 let proxyIndex = 0; // round-robin counter
 
 // ---------- Core page fetch (one attempt with a given proxy config) ----------
+// Strategy:
+//   1. Load turo.com homepage to establish session cookies (avoids geocoding step)
+//   2. Directly call /api/v2/search with those cookies (same params as browser URL)
+// This is faster and works through proxies where geocoding endpoints are blocked.
 async function fetchWithContext(browser, url, proxyConfig) {
-  // Create an isolated browser context — proxy is set per context, not per browser
   const ctxOptions = { viewport: { width: 1280, height: 800 } };
   if (proxyConfig) ctxOptions.proxy = proxyConfig;
   const ctx = await browser.newContext(ctxOptions);
   const page = await ctx.newPage();
   try {
-    const intercepted = [];
-    page.on("response", async (resp) => {
-      try {
-        const rUrl = resp.url();
-        if (
-          (rUrl.includes("/api/") || rUrl.includes("/search")) &&
-          !rUrl.includes("google") && !rUrl.includes("segment") &&
-          !rUrl.includes("analytics") && !rUrl.includes("newrelic")
-        ) {
-          const ct = resp.headers()["content-type"] || "";
-          console.log(`      ↳ ${resp.status()} ${rUrl.slice(0, 80)}`);
-          if (ct.includes("json")) {
-            const json = await resp.json().catch(() => null);
-            if (json) intercepted.push(json);
-          }
-        }
-      } catch (_) {}
-    });
-
     const t0 = Date.now();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
-    await page.waitForTimeout(10_000);
+    const via = proxyConfig ? `proxy ${proxyConfig.server}` : "direct";
+
+    // Step 1: Load Turo homepage to establish session cookies
+    // (Skips the geocoding step that blocks api/v2/search from firing through proxies)
+    await page.goto("https://turo.com/us/en", { waitUntil: "domcontentloaded", timeout: 30_000 });
+    await page.waitForTimeout(1_500); // let auth cookies settle
+
+    // Step 2: Build direct API URL — same query params as the browser search URL
+    const searchUrl = new URL(url);
+    const apiUrl = `https://turo.com/api/v2/search${searchUrl.search}`;
+
+    // Step 3: Call the search API directly using the browser's session cookies
+    const result = await page.evaluate(async (endpoint) => {
+      try {
+        const resp = await fetch(endpoint, {
+          credentials: "include",
+          headers: {
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://turo.com/us/en/search",
+          },
+        });
+        const status = resp.status;
+        if (!resp.ok) return { status, data: null };
+        return { status, data: await resp.json() };
+      } catch (e) {
+        return { status: 0, data: null, error: e.message };
+      }
+    }, apiUrl);
+
     const elapsed = Date.now() - t0;
 
-    // Extract vehicles from intercepted API responses
-    let vehicles = [];
-    for (const json of intercepted) {
-      const arr =
-        json?.vehicles ??
-        json?.list ??
-        json?.results ??
-        json?.data?.vehicles ??
-        json?.data?.list ??
-        json?.searchResult?.list ??
-        null;
-      if (Array.isArray(arr) && arr.length > 0) {
-        vehicles.push(...extractFromJson(arr));
-      } else {
-        vehicles.push(...extractFromJson(json));
-      }
+    if (!result.data) {
+      console.log(`    [${elapsed}ms] via ${via}: API status ${result.status} → blocked`);
+      return { vehicles: [], interceptedCount: 0 };
     }
 
-    // Fallback: walk page state if XHR interception found nothing
-    if (vehicles.length === 0) {
-      vehicles = await page.evaluate(() => {
-        function norm(node) {
-          if (!node || typeof node !== "object") return null;
-          const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
-          const price = node.avgDailyPrice?.amount ?? node.avgDailyPrice ??
-            node.dailyPrice ?? node.dailyPriceWithCurrency?.amount ??
-            node.dailyPricing?.dailyPrice ?? node.price?.amount;
-          const make = node.make ?? node.vehicle?.make ?? node.makeName;
-          const model = node.model ?? node.vehicle?.model ?? node.modelName;
-          if (!id || !price || (!make && !model)) return null;
-          return { vehicle_id: String(id), make: make ?? null, model: model ?? null,
-            year: Number(node.year ?? node.vehicle?.year) || null,
-            avg_daily_price: Number(price) || null,
-            vehicle_type: node.type ?? node.vehicleType ?? node.vehicle?.type ?? null,
-            fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
-            completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
-            rating: Number(node.rating ?? node.hostRating ?? node.avgRating) || null,
-            is_all_star_host: Boolean(node.isAllStarHost ?? node.host?.isAllStarHost),
-            host_name: node.hostName ?? node.host?.firstName ?? null,
-            image_url: node.images?.[0]?.originalImageUrl ?? node.images?.[0]?.url ?? null,
-            location_city: node.location?.city ?? node.locationCity ?? null,
-            location_state: node.location?.state ?? node.locationState ?? null,
-          };
-        }
-        const out = []; const seen = new Set();
-        function walk(v, d = 0) {
-          if (d > 10 || v == null) return;
-          if (Array.isArray(v)) { for (const x of v) walk(x, d + 1); return; }
-          if (typeof v === "object") {
-            const n = norm(v);
-            if (n && !seen.has(n.vehicle_id)) { seen.add(n.vehicle_id); out.push(n); }
-            for (const k in v) walk(v[k], d + 1);
-          }
-        }
-        const nextEl = document.getElementById("__NEXT_DATA__");
-        if (nextEl) { try { walk(JSON.parse(nextEl.textContent)); } catch (_) {} }
-        if (window.__APOLLO_STATE__) walk(window.__APOLLO_STATE__);
-        if (window.__INITIAL_STATE__) walk(window.__INITIAL_STATE__);
-        return out;
-      });
-    }
+    // Extract vehicles from direct API response
+    const arr =
+      result.data?.vehicles ??
+      result.data?.list ??
+      result.data?.results ??
+      null;
+    let vehicles = Array.isArray(arr) ? extractFromJson(arr) : extractFromJson(result.data);
 
     // Dedup by vehicle_id
     const seen = new Set();
     vehicles = vehicles.filter(v => { if (seen.has(v.vehicle_id)) return false; seen.add(v.vehicle_id); return true; });
 
-    const via = proxyConfig ? `proxy ${proxyConfig.server}` : "direct";
-    console.log(`    [${elapsed}ms] via ${via}: intercepted=${intercepted.length} blobs → ${vehicles.length} vehicles`);
-    // Return both vehicles and how many API blobs were intercepted.
-    // intercepted.length === 0 means the IP was blocked (no API calls reached us).
-    // intercepted.length > 0 but vehicles === 0 means the segment is legitimately empty.
-    return { vehicles, interceptedCount: intercepted.length };
+    console.log(`    [${elapsed}ms] via ${via}: api/v2/search → ${vehicles.length} vehicles`);
+    // interceptedCount > 0 means API responded (even 0 vehicles = legitimately empty segment)
+    return { vehicles, interceptedCount: 1 };
   } finally {
     await page.close().catch(() => {});
     await ctx.close().catch(() => {});
   }
 }
+
 
 // ---------- Stealth Playwright fetch with proxy fallback ----------
 // 1st try: direct VPS IP (free, fast).
