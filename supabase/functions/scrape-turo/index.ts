@@ -1,7 +1,6 @@
-// Turo scraper edge function — uses Firecrawl to fetch search pages
-// (Firecrawl handles Cloudflare + proxies for us), extracts the JSON
-// Turo embeds in __NEXT_DATA__, normalises vehicle records, and writes
-// them to listings_current / listings_snapshots / price_forecasts.
+// Turo scraper edge function — uses Geonix residential proxy ONLY.
+// No Firecrawl fallback: if Geonix fails, the run fails loudly so the
+// UI can show an alert.
 //
 // Trigger:
 //   POST /scrape-turo                          → all active cities
@@ -16,9 +15,30 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY");
+const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+const UAS = [
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+];
+const LOCALES = ["en-US,en;q=0.9", "en-GB,en;q=0.9"];
+const pick = <T>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
+const rand = () => Math.random().toString(36).slice(2, 10);
+
+function buildProxyWithSession(sessionId: string): string | null {
+  if (!GEONIX_PROXY_URL) return null;
+  try {
+    const u = new URL(GEONIX_PROXY_URL);
+    const user = decodeURIComponent(u.username);
+    u.username = encodeURIComponent(`${user}-session-${sessionId}`);
+    return u.toString();
+  } catch {
+    return GEONIX_PROXY_URL;
+  }
+}
 
 type City = {
   slug: string;
