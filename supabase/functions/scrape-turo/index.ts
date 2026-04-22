@@ -41,6 +41,13 @@ function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
+function isoDateTime(d: Date) {
+  // Turo expects MM/DD/YYYY HH:mm in pickup/dropoff
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${mm}/${dd}/${d.getUTCFullYear()}`;
+}
+
 function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
   const start = new Date();
   start.setUTCDate(start.getUTCDate() + win.offsetDays);
@@ -67,6 +74,34 @@ function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
   });
   if (city.place_id) params.set("placeId", city.place_id);
   return `https://turo.com/us/en/search?${params.toString()}`;
+}
+
+// Direct JSON search API (much more reliable than parsing the HTML shell).
+function buildApiSearchUrl(city: City, win: typeof WINDOWS[number]) {
+  const start = new Date();
+  start.setUTCDate(start.getUTCDate() + win.offsetDays);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + win.spanDays);
+  const params = new URLSearchParams({
+    country: city.country,
+    defaultZoomLevel: "11",
+    isMapSearch: "false",
+    itemsPerPage: "200",
+    latitude: String(city.latitude),
+    location: city.name,
+    locationType: "CITY",
+    longitude: String(city.longitude),
+    pickupType: "ALL",
+    region: city.region ?? "",
+    searchDurationType: "DAILY",
+    sortType: "RELEVANCE",
+    pickupDate: isoDateTime(start),
+    pickupTime: "10:00",
+    dropoffDate: isoDateTime(end),
+    dropoffTime: "10:00",
+  });
+  if (city.place_id) params.set("placeId", city.place_id);
+  return `https://turo.com/api/v2/search?${params.toString()}`;
 }
 
 // Recursively walk a JSON value and extract vehicle-shaped objects.
@@ -230,7 +265,7 @@ function findObjectEnd(s: string, fromIdx: number): number {
   return -1;
 }
 
-async function firecrawlScrape(url: string): Promise<string | null> {
+async function firecrawlFetch(url: string, expectJson: boolean): Promise<{ html?: string; json?: any } | null> {
   const resp = await fetch("https://api.firecrawl.dev/v2/scrape", {
     method: "POST",
     headers: {
@@ -241,7 +276,7 @@ async function firecrawlScrape(url: string): Promise<string | null> {
       url,
       formats: ["rawHtml"],
       onlyMainContent: false,
-      waitFor: 5000,
+      waitFor: expectJson ? 0 : 4000,
       location: { country: "US", languages: ["en"] },
     }),
   });
@@ -251,7 +286,23 @@ async function firecrawlScrape(url: string): Promise<string | null> {
     return null;
   }
   const data = await resp.json();
-  return data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? null;
+  const raw = data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? null;
+  if (!raw) return null;
+  if (expectJson) {
+    // The API endpoint returns JSON; Firecrawl wraps it in <html><body><pre>...</pre></body></html>
+    const stripped = raw.replace(/<[^>]+>/g, "").trim();
+    try {
+      return { json: JSON.parse(stripped) };
+    } catch {
+      // Sometimes the JSON sits inside a <pre> tag — try a more targeted match
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) {
+        try { return { json: JSON.parse(m[0]) }; } catch {}
+      }
+      return { html: raw };
+    }
+  }
+  return { html: raw };
 }
 
 async function scrapeCity(
@@ -272,38 +323,40 @@ async function scrapeCity(
     let segmentsRun = 0;
 
     for (const win of WINDOWS) {
-      const url = buildSearchUrl(city, win);
-      console.log(`[${city.slug}/${win.key}] ${url.slice(0, 100)}...`);
-      const html = await firecrawlScrape(url);
-      if (!html) continue;
-      segmentsRun++;
-
-      // Try multiple extraction strategies
       let vehicles: any[] = [];
 
-      // 1. Legacy __NEXT_DATA__ blob
-      const next = extractNextData(html);
-      if (next) vehicles = extractFromJson(next);
-
-      // 2. Modern Next.js streaming chunks: self.__next_f.push([...,"...json..."])
-      if (vehicles.length === 0) {
-        vehicles = extractFromNextStreaming(html);
+      // Strategy A: hit Turo's JSON API directly via Firecrawl
+      const apiUrl = buildApiSearchUrl(city, win);
+      console.log(`[${city.slug}/${win.key}] API ${apiUrl.slice(0, 110)}...`);
+      const apiResp = await firecrawlFetch(apiUrl, true);
+      if (apiResp?.json) {
+        vehicles = extractFromJson(apiResp.json);
+        console.log(`  → API: ${vehicles.length} vehicles`);
+      } else {
+        console.log(`  → API: no JSON returned`);
       }
 
-      // 3. Inline JSON-LD or any embedded { "vehicleId": ... } shapes
+      // Strategy B: fall back to scraping the HTML search page if API yielded nothing
       if (vehicles.length === 0) {
-        vehicles = extractFromHtmlScan(html);
+        const htmlUrl = buildSearchUrl(city, win);
+        console.log(`[${city.slug}/${win.key}] HTML fallback ${htmlUrl.slice(0, 100)}...`);
+        const htmlResp = await firecrawlFetch(htmlUrl, false);
+        const html = htmlResp?.html;
+        if (html) {
+          const next = extractNextData(html);
+          if (next) vehicles = extractFromJson(next);
+          if (vehicles.length === 0) vehicles = extractFromNextStreaming(html);
+          if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
+          console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
+
+          if (vehicles.length === 0) {
+            const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
+            console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
+          }
+        }
       }
 
-      console.log(`  → ${vehicles.length} vehicles (htmlLen=${html.length}, hasNextData=${!!next})`);
-
-      // If still nothing, log a small HTML sample once per segment to diagnose
-      if (vehicles.length === 0) {
-        const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
-        const hasNextStreaming = /self\.__next_f\.push/.test(html);
-        console.log(`    diag: cfChallenge=${hasCfChallenge}, nextStreaming=${hasNextStreaming}, sample=${html.slice(0, 300).replace(/\s+/g, " ")}`);
-      }
-
+      segmentsRun++;
       for (const v of vehicles) {
         const existing = merged.get(v.vehicle_id);
         if (existing) {
