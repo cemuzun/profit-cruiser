@@ -41,6 +41,13 @@ function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
 }
 
+function isoDateTime(d: Date) {
+  // Turo expects MM/DD/YYYY HH:mm in pickup/dropoff
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${mm}/${dd}/${d.getUTCFullYear()}`;
+}
+
 function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
   const start = new Date();
   start.setUTCDate(start.getUTCDate() + win.offsetDays);
@@ -67,6 +74,34 @@ function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
   });
   if (city.place_id) params.set("placeId", city.place_id);
   return `https://turo.com/us/en/search?${params.toString()}`;
+}
+
+// Direct JSON search API (much more reliable than parsing the HTML shell).
+function buildApiSearchUrl(city: City, win: typeof WINDOWS[number]) {
+  const start = new Date();
+  start.setUTCDate(start.getUTCDate() + win.offsetDays);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + win.spanDays);
+  const params = new URLSearchParams({
+    country: city.country,
+    defaultZoomLevel: "11",
+    isMapSearch: "false",
+    itemsPerPage: "200",
+    latitude: String(city.latitude),
+    location: city.name,
+    locationType: "CITY",
+    longitude: String(city.longitude),
+    pickupType: "ALL",
+    region: city.region ?? "",
+    searchDurationType: "DAILY",
+    sortType: "RELEVANCE",
+    pickupDate: isoDateTime(start),
+    pickupTime: "10:00",
+    dropoffDate: isoDateTime(end),
+    dropoffTime: "10:00",
+  });
+  if (city.place_id) params.set("placeId", city.place_id);
+  return `https://turo.com/api/v2/search?${params.toString()}`;
 }
 
 // Recursively walk a JSON value and extract vehicle-shaped objects.
