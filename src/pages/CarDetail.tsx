@@ -333,7 +333,34 @@ export default function CarDetail() {
 
             {mode === "buy" ? (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <Field label="Purchase price" value={form.purchase_price} onChange={(v) => setForm({ ...form, purchase_price: v })} />
+                <div className="col-span-2">
+                  <Label className="text-xs">Purchase price</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      value={form.purchase_price ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setForm({ ...form, purchase_price: v === "" ? undefined : Number(v) });
+                      }}
+                      placeholder="(global)"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="default"
+                      disabled={fetchCarGurus.isPending || !car.make || !car.model}
+                      onClick={() => fetchCarGurus.mutate()}
+                      title="Fetch average asking price from CarGurus"
+                    >
+                      {fetchCarGurus.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      CarGurus
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Pulls the typical asking price for {car.year} {car.make} {car.model}{car.trim ? ` ${car.trim}` : ""} from cargurus.com.
+                  </p>
+                </div>
                 <Field label="Depreciation %/yr" value={form.depreciation_pct_annual} onChange={(v) => setForm({ ...form, depreciation_pct_annual: v })} />
               </div>
             ) : (
