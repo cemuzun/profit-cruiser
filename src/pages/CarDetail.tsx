@@ -91,6 +91,7 @@ export default function CarDetail() {
         mileage_cap_monthly: o.mileage_cap_monthly ?? undefined,
         mileage_overage_per_mi: o.mileage_overage_per_mi ?? undefined,
         avg_miles_per_trip: o.avg_miles_per_trip ?? undefined,
+        avg_miles_per_day: o.avg_miles_per_day ?? undefined,
       });
     }
   }, [override]);
@@ -331,9 +332,10 @@ export default function CarDetail() {
                 <Field label="Mileage cap / mo" value={form.mileage_cap_monthly} onChange={(v) => setForm({ ...form, mileage_cap_monthly: v })} />
                 <Field label="Overage $/mile" value={form.mileage_overage_per_mi} onChange={(v) => setForm({ ...form, mileage_overage_per_mi: v })} step="0.01" />
                 <Field label="Avg miles per trip" value={form.avg_miles_per_trip} onChange={(v) => setForm({ ...form, avg_miles_per_trip: v })} />
+                <Field label="Avg miles per day" value={form.avg_miles_per_day} onChange={(v) => setForm({ ...form, avg_miles_per_day: v })} />
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Estimated miles/mo = trips/mo × avg miles per trip. Overage applies in both buy and lease modes (lease has hard caps; for buys this proxies extra wear).
+                If <em>avg miles per day</em> is set, miles/mo = 30 × utilization% × miles/day. Otherwise miles/mo = trips/mo × miles/trip. Overage applies in both buy and lease modes.
               </p>
             </div>
 

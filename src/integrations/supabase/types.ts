@@ -54,6 +54,7 @@ export type Database = {
         Row: {
           cleaning_per_trip: number
           default_acquisition_mode: string
+          default_avg_miles_per_day: number | null
           default_avg_miles_per_trip: number
           default_lease_down: number
           default_lease_monthly: number
@@ -75,6 +76,7 @@ export type Database = {
         Insert: {
           cleaning_per_trip?: number
           default_acquisition_mode?: string
+          default_avg_miles_per_day?: number | null
           default_avg_miles_per_trip?: number
           default_lease_down?: number
           default_lease_monthly?: number
@@ -96,6 +98,7 @@ export type Database = {
         Update: {
           cleaning_per_trip?: number
           default_acquisition_mode?: string
+          default_avg_miles_per_day?: number | null
           default_avg_miles_per_trip?: number
           default_lease_down?: number
           default_lease_monthly?: number
@@ -119,6 +122,7 @@ export type Database = {
       cost_overrides: {
         Row: {
           acquisition_mode: string | null
+          avg_miles_per_day: number | null
           avg_miles_per_trip: number | null
           cleaning_per_trip: number | null
           depreciation_pct_annual: number | null
@@ -140,6 +144,7 @@ export type Database = {
         }
         Insert: {
           acquisition_mode?: string | null
+          avg_miles_per_day?: number | null
           avg_miles_per_trip?: number | null
           cleaning_per_trip?: number | null
           depreciation_pct_annual?: number | null
@@ -161,6 +166,7 @@ export type Database = {
         }
         Update: {
           acquisition_mode?: string | null
+          avg_miles_per_day?: number | null
           avg_miles_per_trip?: number | null
           cleaning_per_trip?: number | null
           depreciation_pct_annual?: number | null

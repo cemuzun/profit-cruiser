@@ -223,6 +223,7 @@ export type CostOverrideRecord = {
   mileage_cap_monthly?: number | null;
   mileage_overage_per_mi?: number | null;
   avg_miles_per_trip?: number | null;
+  avg_miles_per_day?: number | null;
   notes?: string | null;
   updated_at: string;
 };

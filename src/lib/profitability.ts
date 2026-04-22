@@ -21,6 +21,7 @@ export type GlobalCosts = {
   default_mileage_cap_monthly: number;
   default_mileage_overage_per_mi: number;
   default_avg_miles_per_trip: number;
+  default_avg_miles_per_day?: number | null;
 };
 
 export type CostOverride = Partial<GlobalCosts> & {
@@ -32,6 +33,7 @@ export type CostOverride = Partial<GlobalCosts> & {
   mileage_cap_monthly?: number | null;
   mileage_overage_per_mi?: number | null;
   avg_miles_per_trip?: number | null;
+  avg_miles_per_day?: number | null;
 };
 
 export type CarLike = {
@@ -60,6 +62,7 @@ export const DEFAULT_GLOBAL: GlobalCosts = {
   default_mileage_cap_monthly: 1000,
   default_mileage_overage_per_mi: 0.25,
   default_avg_miles_per_trip: 80,
+  default_avg_miles_per_day: null,
 };
 
 // Smart estimate of purchase price based on year/make (very rough fallback).
@@ -82,6 +85,7 @@ export function effectiveCosts(global: GlobalCosts, override?: CostOverride | nu
   mileage_cap_monthly: number;
   mileage_overage_per_mi: number;
   avg_miles_per_trip: number;
+  avg_miles_per_day: number | null;
 } {
   const merged: any = { ...global };
   if (override) {
@@ -97,6 +101,7 @@ export function effectiveCosts(global: GlobalCosts, override?: CostOverride | nu
   merged.mileage_cap_monthly = override?.mileage_cap_monthly ?? global.default_mileage_cap_monthly;
   merged.mileage_overage_per_mi = override?.mileage_overage_per_mi ?? global.default_mileage_overage_per_mi;
   merged.avg_miles_per_trip = override?.avg_miles_per_trip ?? global.default_avg_miles_per_trip;
+  merged.avg_miles_per_day = override?.avg_miles_per_day ?? global.default_avg_miles_per_day ?? null;
   return merged;
 }
 
@@ -133,7 +138,11 @@ export function computeProfit(car: CarLike, global: GlobalCosts, override?: Cost
   const monthlyRevenueNet = monthlyRevenueGross - turoFee;
 
   const tripsPerMonth = eff.trips_per_month_estimate * (utilizationPct / 60);
-  const estimatedMilesPerMonth = tripsPerMonth * eff.avg_miles_per_trip;
+  // If avg_miles_per_day is set, it takes precedence: miles/mo = 30 * utilization% * miles/day
+  // Otherwise fall back to per-trip estimate: miles/mo = trips/mo * miles/trip
+  const estimatedMilesPerMonth = eff.avg_miles_per_day != null && eff.avg_miles_per_day > 0
+    ? 30 * (utilizationPct / 100) * eff.avg_miles_per_day
+    : tripsPerMonth * eff.avg_miles_per_trip;
   const overageMiles = Math.max(0, estimatedMilesPerMonth - eff.mileage_cap_monthly);
   const costMileageOverage = overageMiles * eff.mileage_overage_per_mi;
 
