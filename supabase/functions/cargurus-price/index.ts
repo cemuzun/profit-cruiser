@@ -5,7 +5,10 @@
 // results page with JSON extraction so we get back a structured number
 // (avg/median listing price) regardless of CarGurus DOM changes.
 
-import { corsHeaders } from "@supabase/supabase-js/cors";
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
 
 const FIRECRAWL_V2 = "https://api.firecrawl.dev/v2";
 
