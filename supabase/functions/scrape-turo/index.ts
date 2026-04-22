@@ -621,28 +621,37 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "No matching active cities found" });
   }
 
-  const results: Record<string, any> = {};
-  for (const city of cities) {
-    results[city.slug] = await scrapeCity(supa, city);
+  // Run scrape in the background — Turo scrapes routinely exceed the 150s
+  // edge function idle timeout. Return 202 immediately; UI polls scrape_runs.
+  const runScrape = async () => {
+    const results: Record<string, any> = {};
+    for (const city of cities) {
+      try {
+        results[city.slug] = await scrapeCity(supa, city);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`background scrapeCity ${city.slug} threw:`, msg);
+        results[city.slug] = { vehicles: 0, segments: 0, error: msg };
+      }
+    }
+    console.log("background scrape complete:", JSON.stringify(results));
+  };
+
+  // @ts-ignore - EdgeRuntime is provided by the Supabase edge runtime
+  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) {
+    // @ts-ignore
+    EdgeRuntime.waitUntil(runScrape());
+  } else {
+    runScrape().catch((e) => console.error("runScrape error:", e));
   }
 
-  const failed = Object.entries(results).filter(([, r]: any) => r?.error);
-  const allFailed = failed.length === cities.length;
-  if (allFailed) {
-    const firstFailed = (failed[0]?.[1] as any) ?? {};
-    return jsonResponse({
-      ok: false,
-      error: firstFailed.error ?? "Scrape failed",
-      fallback: true,
-      diagnostics: firstFailed.diagnostics ?? {
-        reason: "unknown",
-        blocked: false,
-        sampleErrors: [],
-        emptyHtmlCount: 0,
-      },
-      results,
-    });
-  }
-
-  return jsonResponse({ ok: true, results });
+  return jsonResponse(
+    {
+      ok: true,
+      queued: true,
+      cities: cities.map((c) => c.slug),
+      message: "Scrape started. Poll scrape_runs for status.",
+    },
+    202,
+  );
 });
