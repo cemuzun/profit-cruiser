@@ -241,6 +241,29 @@ function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
 // so the daily price reflects the search window we requested.
 function normaliseApifyItem(item: any): any | null {
   if (!item || typeof item !== "object") return null;
+  // Pre-normalised by our pageFunction? Pass-through.
+  if (item.vehicle_id && (item.make || item.model)) {
+    return {
+      vehicle_id: String(item.vehicle_id),
+      make: item.make ?? null,
+      model: item.model ?? null,
+      year: item.year ?? null,
+      trim: item.trim ?? null,
+      vehicle_type: item.vehicle_type ?? null,
+      fuel_type: item.fuel_type ?? null,
+      avg_daily_price: item.avg_daily_price ?? null,
+      completed_trips: item.completed_trips ?? 0,
+      rating: item.rating ?? null,
+      is_all_star_host: Boolean(item.is_all_star_host),
+      host_id: item.host_id ?? null,
+      host_name: item.host_name ?? null,
+      image_url: item.image_url ?? null,
+      location_city: item.location_city ?? null,
+      location_state: item.location_state ?? null,
+      latitude: item.latitude ?? null,
+      longitude: item.longitude ?? null,
+    };
+  }
   const id =
     item.vehicleId ?? item.id ?? item.vehicle?.id ?? item.listingId;
   const rawPrice =
