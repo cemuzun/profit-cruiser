@@ -376,10 +376,16 @@ async function scrapeCity(
     for (const win of WINDOWS) {
       let vehicles: any[] = [];
 
-      // Strategy A: hit Turo's JSON API directly via Firecrawl
+      // Strategy A: hit Turo's JSON API directly via Geonix residential proxy (preferred)
       const apiUrl = buildApiSearchUrl(city, win);
-      console.log(`[${city.slug}/${win.key}] API ${apiUrl.slice(0, 110)}...`);
-      const apiResp = await firecrawlFetch(apiUrl, true);
+      console.log(`[${city.slug}/${win.key}] API(geonix) ${apiUrl.slice(0, 110)}...`);
+      let apiResp = await geonixFetch(apiUrl, true);
+
+      // Strategy A2: if Geonix failed/unavailable, try Firecrawl
+      if (!apiResp?.json && FIRECRAWL_API_KEY) {
+        console.log(`  → falling back to Firecrawl for API`);
+        apiResp = await firecrawlFetch(apiUrl, true);
+      }
       if (apiResp?.json) {
         vehicles = extractFromJson(apiResp.json);
         console.log(`  → API: ${vehicles.length} vehicles`);
@@ -387,11 +393,15 @@ async function scrapeCity(
         console.log(`  → API: no JSON returned`);
       }
 
-      // Strategy B: fall back to scraping the HTML search page if API yielded nothing
+      // Strategy B: HTML search page fallback (Geonix first, then Firecrawl)
       if (vehicles.length === 0) {
         const htmlUrl = buildSearchUrl(city, win);
-        console.log(`[${city.slug}/${win.key}] HTML fallback ${htmlUrl.slice(0, 100)}...`);
-        const htmlResp = await firecrawlFetch(htmlUrl, false);
+        console.log(`[${city.slug}/${win.key}] HTML(geonix) ${htmlUrl.slice(0, 100)}...`);
+        let htmlResp = await geonixFetch(htmlUrl, false);
+        if (!htmlResp?.html && FIRECRAWL_API_KEY) {
+          console.log(`  → falling back to Firecrawl for HTML`);
+          htmlResp = await firecrawlFetch(htmlUrl, false);
+        }
         const html = htmlResp?.html;
         if (html) {
           const next = extractNextData(html);
@@ -540,9 +550,9 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  if (!FIRECRAWL_API_KEY) {
+  if (!FIRECRAWL_API_KEY && !GEONIX_PROXY_URL) {
     return new Response(
-      JSON.stringify({ error: "FIRECRAWL_API_KEY not configured" }),
+      JSON.stringify({ error: "Neither GEONIX_PROXY_URL nor FIRECRAWL_API_KEY is configured" }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
