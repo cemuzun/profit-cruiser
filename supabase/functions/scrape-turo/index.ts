@@ -340,9 +340,6 @@ async function geonixFetch(
     throw new Error(`Geonix fetch failed after 3 attempts: ${msg}`);
   }
 }
-  }
-  return { html: raw };
-}
 
 async function scrapeCity(
   supa: ReturnType<typeof createClient>,
