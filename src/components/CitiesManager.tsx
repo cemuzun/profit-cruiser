@@ -26,7 +26,6 @@ export function CitiesManager() {
   const { data: runs } = useQuery({
     queryKey: ["scrape-runs"],
     queryFn: () => ds.runs(),
-    refetchInterval: 30000,
   });
 
   const lastRun = runs?.[0];
