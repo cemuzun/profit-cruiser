@@ -10,7 +10,9 @@ import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
 import { turoCarUrl } from "@/lib/utils";
 import { VerdictBadge } from "./Dashboard";
-import { Trash2, ExternalLink, GitCompare } from "lucide-react";
+import { Trash2, ExternalLink, GitCompare, RefreshCw } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 const MAX_COMPARE = 4;
 
@@ -40,6 +42,25 @@ export default function Watchlist() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist-full"] }),
   });
 
+  const refreshPricing = useMutation({
+    mutationFn: async () => {
+      const ids = userStore.getWatchlist().map((w) => w.vehicle_id);
+      if (!ids.length) throw new Error("Watchlist is empty");
+      const { data, error } = await supabase.functions.invoke("turo-pricing", {
+        body: { vehicleIds: ids },
+      });
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: (data: any) => {
+      const ok = data?.results?.filter((r: any) => r.ok).length ?? 0;
+      const fail = data?.results?.filter((r: any) => !r.ok).length ?? 0;
+      toast.success(`Refreshed pricing: ${ok} ok, ${fail} failed`);
+      qc.invalidateQueries({ queryKey: ["watchlist-full"] });
+    },
+    onError: (e: any) => toast.error(`Refresh failed: ${e.message ?? e}`),
+  });
+
   const toggle = (id: string) => {
     setSelected((prev) => {
       if (prev.includes(id)) return prev.filter((x) => x !== id);
@@ -54,11 +75,21 @@ export default function Watchlist() {
       <main className="container mx-auto px-4 py-6 space-y-4">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h1 className="text-2xl font-bold">Watchlist</h1>
-          {selected.length >= 2 && (
-            <Button onClick={() => navigate(`/compare?ids=${selected.join(",")}`)}>
-              <GitCompare className="h-4 w-4" /> Compare selected ({selected.length})
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => refreshPricing.mutate()}
+              disabled={refreshPricing.isPending || !items?.length}
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshPricing.isPending ? "animate-spin" : ""}`} />
+              {refreshPricing.isPending ? "Refreshing…" : "Refresh pricing"}
             </Button>
-          )}
+            {selected.length >= 2 && (
+              <Button onClick={() => navigate(`/compare?ids=${selected.join(",")}`)}>
+                <GitCompare className="h-4 w-4" /> Compare selected ({selected.length})
+              </Button>
+            )}
+          </div>
         </div>
         {!items || items.length === 0 ? (
           <Card><CardContent className="pt-6 text-center text-muted-foreground">
