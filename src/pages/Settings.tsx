@@ -101,7 +101,7 @@ export default function Settings() {
         <Card>
           <CardContent className="pt-4 space-y-3">
             <h2 className="font-semibold">Scrape runs</h2>
-            <p className="text-xs text-muted-foreground">VPS scraper runs at 08:00 and 20:00 UTC. Latest 50 runs published with each refresh.</p>
+            <p className="text-xs text-muted-foreground">Auto-scrape runs daily at 09:00 UTC. You can also trigger runs from the dashboard. Latest 50 runs shown.</p>
             <div className="space-y-1.5">
               {runs?.length ? runs.map((r: any) => (
                 <div key={r.id} className="flex items-center justify-between text-sm border border-border rounded-md px-3 py-2">
