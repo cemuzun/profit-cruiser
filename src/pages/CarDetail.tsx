@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict, type CostOverride, type AcquisitionMode } from "@/lib/profitability";
+import { turoCarUrl } from "@/lib/utils";
 function PriceTile({ label, value }: { label: string; value: number | null | undefined }) {
   return (
     <div className="border border-border rounded-md p-2">
@@ -18,7 +19,7 @@ function PriceTile({ label, value }: { label: string; value: number | null | und
     </div>
   );
 }
-import { ArrowLeft, Bookmark, BookmarkCheck, Loader2 } from "lucide-react";
+import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink } from "lucide-react";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { format } from "date-fns";
 import { toast } from "sonner";
@@ -170,11 +171,27 @@ export default function CarDetail() {
             <CardContent className="pt-4 space-y-3">
               <div className="flex items-start gap-4">
                 {car.image_url && (
-                  <img src={car.image_url} alt="" className="h-32 w-48 object-cover rounded-md" />
+                  <a
+                    href={turoCarUrl(car.vehicle_id)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open on Turo"
+                  >
+                    <img src={car.image_url} alt={`${car.year ?? ""} ${car.make ?? ""} ${car.model ?? ""}`.trim()} className="h-32 w-48 object-cover rounded-md hover:opacity-80 transition" />
+                  </a>
                 )}
                 <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <h1 className="text-2xl font-bold">{car.year} {car.make} {car.model}</h1>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <a
+                      href={turoCarUrl(car.vehicle_id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-2xl font-bold hover:underline inline-flex items-center gap-1.5"
+                      title="Open on Turo"
+                    >
+                      {car.year} {car.make} {car.model}
+                      <ExternalLink className="h-4 w-4 opacity-60" />
+                    </a>
                     {v && <VerdictBadge tone={v.tone} label={v.label} />}
                   </div>
                   <p className="text-sm text-muted-foreground">
