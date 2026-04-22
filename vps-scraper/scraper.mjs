@@ -104,12 +104,9 @@ async function extractVehicles(page) {
       if (!node || typeof node !== "object") return;
       // Heuristic: Turo vehicle objects have id + dailyPriceWithCurrency or avgDailyPrice
       const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
-      const price =
-        node.avgDailyPrice ??
-        node.dailyPrice ??
-        node.dailyPriceWithCurrency?.amount ??
-        node.dailyPricing?.dailyPrice ??
-        node.price?.amount;
+      // avgDailyPrice can be { amount, currency } (object) or a plain number
+      const rawPrice = node.avgDailyPrice ?? node.dailyPrice ?? node.dailyPriceWithCurrency ?? node.dailyPricing?.dailyPrice ?? node.price;
+      const price = (rawPrice && typeof rawPrice === "object") ? rawPrice.amount : rawPrice;
       const make = node.make ?? node.vehicle?.make ?? node.makeName;
       const model = node.model ?? node.vehicle?.model ?? node.modelName;
       if (id && price && (make || model)) {
@@ -119,7 +116,7 @@ async function extractVehicles(page) {
           model: model ?? null,
           year: Number(node.year ?? node.vehicle?.year) || null,
           trim: node.trim ?? node.vehicle?.trim ?? null,
-          vehicle_type: node.type ?? node.vehicle?.type ?? null,
+          vehicle_type: node.type ?? node.seoCategory ?? node.vehicle?.type ?? null,
           fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
           avg_daily_price: Number(price) || null,
           completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
@@ -168,17 +165,18 @@ async function extractVehicles(page) {
 
 // ---------- Vehicle data extractor ----------
 // Normalises raw vehicle objects from Turo's API JSON into our DB shape.
+// Turo's real API returns avgDailyPrice as { amount: number, currency: string }.
 function normaliseVehicle(node) {
   if (!node || typeof node !== "object") return null;
   const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
-  const price =
-    node.avgDailyPrice?.amount ??
+  // Handle nested price objects: { amount, currency } or plain numbers
+  const rawPrice =
     node.avgDailyPrice ??
-    node.dailyPrice?.amount ??
     node.dailyPrice ??
-    node.dailyPriceWithCurrency?.amount ??
+    node.dailyPriceWithCurrency ??
     node.dailyPricing?.dailyPrice ??
-    node.price?.amount;
+    node.price;
+  const price = (rawPrice && typeof rawPrice === "object") ? rawPrice.amount : rawPrice;
   const make = node.make ?? node.vehicle?.make ?? node.makeName;
   const model = node.model ?? node.vehicle?.model ?? node.modelName;
   if (!id || !price || (!make && !model)) return null;
@@ -188,7 +186,7 @@ function normaliseVehicle(node) {
     model: model ?? null,
     year: Number(node.year ?? node.vehicle?.year) || null,
     trim: node.trim ?? node.vehicle?.trim ?? null,
-    vehicle_type: node.type ?? node.vehicleType ?? node.vehicle?.type ?? null,
+    vehicle_type: node.type ?? node.seoCategory ?? node.vehicleType ?? node.vehicle?.type ?? null,
     fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
     avg_daily_price: Number(price) || null,
     completed_trips: Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
@@ -253,10 +251,13 @@ if (PROXIES.length > 0) {
 let proxyIndex = 0; // round-robin counter
 
 // ---------- Core page fetch (one attempt with a given proxy config) ----------
-// Strategy:
-//   1. Load turo.com homepage to establish session cookies (avoids geocoding step)
-//   2. Directly call /api/v2/search with those cookies (same params as browser URL)
-// This is faster and works through proxies where geocoding endpoints are blocked.
+// Strategy (hybrid):
+//   1. Navigate to the Turo search page and intercept all API responses.
+//   2. Turo's React fires /api/v2/search → Cloudflare often 403s it.
+//   3. CF challenge scripts run & solve automatically (~5-10s).
+//   4. If no successful search XHR was intercepted after the challenge,
+//      we manually retry the API call from the page context — now the
+//      CF cookies/tokens are valid so it succeeds.
 async function fetchWithContext(browser, url, proxyConfig) {
   const ctxOptions = { viewport: { width: 1280, height: 800 } };
   if (proxyConfig) ctxOptions.proxy = proxyConfig;
@@ -266,55 +267,131 @@ async function fetchWithContext(browser, url, proxyConfig) {
     const t0 = Date.now();
     const via = proxyConfig ? `proxy ${proxyConfig.server}` : "direct";
 
-    // Step 1: Load Turo homepage to establish session cookies
-    // (Skips the geocoding step that blocks api/v2/search from firing through proxies)
-    await page.goto("https://turo.com/us/en", { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.waitForTimeout(1_500); // let auth cookies settle
+    // Track both successful interceptions and the search API URL that Turo uses
+    let interceptedData = null;
+    let interceptedUrl = null;
+    let searchApiUrl = null;       // the URL Turo's JS tried (even if 403)
+    let challengeSolved = false;   // CF challenge completed
 
-    // Step 2: Build direct API URL — same query params as the browser search URL
-    const searchUrl = new URL(url);
-    const apiUrl = `https://turo.com/api/v2/search${searchUrl.search}`;
+    page.on("response", async (resp) => {
+      const rUrl = resp.url();
+      const status = resp.status();
+      const ct = resp.headers()["content-type"] || "";
 
-    // Step 3: Call the search API directly using the browser's session cookies
-    const result = await page.evaluate(async (endpoint) => {
-      try {
-        const resp = await fetch(endpoint, {
-          credentials: "include",
-          headers: {
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://turo.com/us/en/search",
-          },
-        });
-        const status = resp.status;
-        if (!resp.ok) return { status, data: null };
-        return { status, data: await resp.json() };
-      } catch (e) {
-        return { status: 0, data: null, error: e.message };
+      // Detect the search API URL Turo's JS fires (even if 403)
+      if (rUrl.includes("turo.com/api") && rUrl.includes("search") && !rUrl.includes("/makes") && !rUrl.includes("/filters")) {
+        if (!searchApiUrl) searchApiUrl = rUrl;
       }
-    }, apiUrl);
+
+      // Detect Cloudflare challenge completion (oneshot response)
+      if (rUrl.includes("challenge-platform") && rUrl.includes("oneshot") && status === 200) {
+        challengeSolved = true;
+      }
+
+      // Catch successful search JSON responses
+      if (
+        rUrl.includes("turo.com/api") &&
+        rUrl.includes("search") &&
+        status === 200 &&
+        ct.includes("json")
+      ) {
+        try {
+          const json = await resp.json();
+          if (json?.vehicles && !interceptedData) {
+            interceptedData = json;
+            interceptedUrl = rUrl;
+          }
+        } catch (_) {}
+      }
+    });
+
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+
+    // Phase 1: Wait up to 15s for a natural successful search XHR
+    const pollStart = Date.now();
+    while (!interceptedData && Date.now() - pollStart < 15_000) {
+      await page.waitForTimeout(500);
+    }
+
+    // Phase 2: If no data yet but CF challenge solved, manually retry the API
+    if (!interceptedData && challengeSolved) {
+      // Build the API URL — use what Turo's JS tried, or construct from the page URL
+      const apiEndpoint = searchApiUrl || `https://turo.com/api/v2/search${new URL(url).search}`;
+      console.log(`    [${Date.now() - t0}ms] via ${via}: CF challenge solved, retrying API manually...`);
+
+      const result = await page.evaluate(async (endpoint) => {
+        try {
+          const resp = await fetch(endpoint, {
+            credentials: "include",
+            headers: {
+              "Accept": "application/json, text/plain, */*",
+              "Accept-Language": "en-US,en;q=0.9",
+            },
+          });
+          if (!resp.ok) return { status: resp.status, data: null };
+          return { status: resp.status, data: await resp.json() };
+        } catch (e) {
+          return { status: 0, data: null, error: e.message };
+        }
+      }, apiEndpoint);
+
+      if (result.data?.vehicles) {
+        interceptedData = result.data;
+        interceptedUrl = apiEndpoint + " (manual retry)";
+      }
+    }
+
+    // Phase 3: If still no data and challenge not yet solved, wait a bit more
+    if (!interceptedData && !challengeSolved) {
+      // Wait up to 15 more seconds for challenge to complete
+      const cfWaitStart = Date.now();
+      while (!challengeSolved && !interceptedData && Date.now() - cfWaitStart < 15_000) {
+        await page.waitForTimeout(500);
+      }
+      // If challenge just solved, retry
+      if (!interceptedData && challengeSolved) {
+        const apiEndpoint = searchApiUrl || `https://turo.com/api/v2/search${new URL(url).search}`;
+        console.log(`    [${Date.now() - t0}ms] via ${via}: late CF solve, retrying API...`);
+
+        const result = await page.evaluate(async (endpoint) => {
+          try {
+            const resp = await fetch(endpoint, {
+              credentials: "include",
+              headers: {
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+              },
+            });
+            if (!resp.ok) return { status: resp.status, data: null };
+            return { status: resp.status, data: await resp.json() };
+          } catch (e) {
+            return { status: 0, data: null, error: e.message };
+          }
+        }, apiEndpoint);
+
+        if (result.data?.vehicles) {
+          interceptedData = result.data;
+          interceptedUrl = apiEndpoint + " (late retry)";
+        }
+      }
+    }
 
     const elapsed = Date.now() - t0;
 
-    if (!result.data) {
-      console.log(`    [${elapsed}ms] via ${via}: API status ${result.status} → blocked`);
+    if (!interceptedData) {
+      console.log(`    [${elapsed}ms] via ${via}: no vehicles obtained (challenge=${challengeSolved}, apiUrl=${searchApiUrl?.split("?")[0] ?? "none"}) → blocked`);
       return { vehicles: [], interceptedCount: 0 };
     }
 
-    // Extract vehicles from direct API response
-    const arr =
-      result.data?.vehicles ??
-      result.data?.list ??
-      result.data?.results ??
-      null;
-    let vehicles = Array.isArray(arr) ? extractFromJson(arr) : extractFromJson(result.data);
+    // Extract vehicles from the intercepted JSON (top-level `vehicles` array)
+    const arr = interceptedData.vehicles ?? interceptedData.list ?? interceptedData.results ?? null;
+    let vehicles = Array.isArray(arr) ? extractFromJson(arr) : extractFromJson(interceptedData);
 
-    // Dedup by vehicle_id
+    // Dedup
     const seen = new Set();
     vehicles = vehicles.filter(v => { if (seen.has(v.vehicle_id)) return false; seen.add(v.vehicle_id); return true; });
 
-    console.log(`    [${elapsed}ms] via ${via}: api/v2/search → ${vehicles.length} vehicles`);
-    // interceptedCount > 0 means API responded (even 0 vehicles = legitimately empty segment)
+    console.log(`    [${elapsed}ms] via ${via}: ${vehicles.length} vehicles (totalHits: ${interceptedData.totalHits}) from ${interceptedUrl?.split("?")[0]}`);
     return { vehicles, interceptedCount: 1 };
   } finally {
     await page.close().catch(() => {});
