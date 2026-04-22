@@ -495,6 +495,10 @@ async function scrapeCity(
       }
     }
 
+    if (currentRows.length === 0) {
+      throw new Error("Geonix proxy returned 0 vehicles across all windows. Check GEONIX_PROXY_URL credentials/quota or Turo blocked the proxy.");
+    }
+
     if (runId) {
       await supa
         .from("scrape_runs")
