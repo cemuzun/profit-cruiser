@@ -19,7 +19,8 @@ function PriceTile({ label, value }: { label: string; value: number | null | und
     </div>
   );
 }
-import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink } from "lucide-react";
+import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink, Download } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { format } from "date-fns";
 import { toast } from "sonner";
@@ -124,6 +125,30 @@ export default function CarDetail() {
       qc.invalidateQueries({ queryKey: ["watchlist-full"] });
       qc.invalidateQueries({ queryKey: ["watchlist-compare-pool"] });
     },
+  });
+
+  const fetchCarGurus = useMutation({
+    mutationFn: async () => {
+      if (!car?.make || !car?.model) throw new Error("Vehicle missing make/model");
+      const { data, error } = await supabase.functions.invoke("cargurus-price", {
+        body: { year: car.year, make: car.make, model: car.model, trim: car.trim },
+      });
+      if (error) throw new Error(error.message);
+      if (!data || data.error) throw new Error(data?.error ?? "No price returned");
+      return data as { avg_price: number | null; min_price: number | null; max_price: number | null; sample_size: number | null; source_url: string };
+    },
+    onSuccess: (data) => {
+      const price = data.avg_price ?? data.min_price ?? data.max_price;
+      if (price == null) {
+        toast.error("CarGurus returned no usable price");
+        return;
+      }
+      setForm((f) => ({ ...f, purchase_price: Math.round(Number(price)) }));
+      toast.success(
+        `Filled $${Math.round(Number(price)).toLocaleString()} from CarGurus${data.sample_size ? ` (${data.sample_size} listings)` : ""}`,
+      );
+    },
+    onError: (e: Error) => toast.error(e.message ?? "CarGurus fetch failed"),
   });
 
   const forecastChartData = useMemo(() => {
@@ -332,7 +357,34 @@ export default function CarDetail() {
 
             {mode === "buy" ? (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <Field label="Purchase price" value={form.purchase_price} onChange={(v) => setForm({ ...form, purchase_price: v })} />
+                <div className="col-span-2">
+                  <Label className="text-xs">Purchase price</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      type="number"
+                      value={form.purchase_price ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setForm({ ...form, purchase_price: v === "" ? undefined : Number(v) });
+                      }}
+                      placeholder="(global)"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="default"
+                      disabled={fetchCarGurus.isPending || !car.make || !car.model}
+                      onClick={() => fetchCarGurus.mutate()}
+                      title="Fetch average asking price from CarGurus"
+                    >
+                      {fetchCarGurus.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                      CarGurus
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Pulls the typical asking price for {car.year} {car.make} {car.model}{car.trim ? ` ${car.trim}` : ""} from cargurus.com.
+                  </p>
+                </div>
                 <Field label="Depreciation %/yr" value={form.depreciation_pct_annual} onChange={(v) => setForm({ ...form, depreciation_pct_annual: v })} />
               </div>
             ) : (
