@@ -19,6 +19,28 @@ const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+type ProxyFailureReason =
+  | "proxy_not_configured"
+  | "proxy_auth_failed"
+  | "proxy_tunnel_failed"
+  | "turo_blocked"
+  | "proxy_empty"
+  | "unknown";
+
+type ScrapeDiagnostics = {
+  reason: ProxyFailureReason;
+  blocked: boolean;
+  sampleErrors: string[];
+  emptyHtmlCount: number;
+};
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 const UAS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -28,17 +50,83 @@ const LOCALES = ["en-US,en;q=0.9", "en-GB,en;q=0.9"];
 const pick = <T>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
 const rand = () => Math.random().toString(36).slice(2, 10);
 
-function buildProxyUrl(): string | null {
-  if (!GEONIX_PROXY_URL) return null;
+function buildProxyUrl(rawProxyUrl: string | null | undefined = GEONIX_PROXY_URL): string | null {
+  if (!rawProxyUrl) return null;
   try {
-    const u = new URL(GEONIX_PROXY_URL);
+    const u = new URL(rawProxyUrl);
     if (!u.protocol || !u.hostname || !u.username || !u.password) {
       throw new Error("Incomplete proxy URL");
     }
     return u.toString();
   } catch {
-    throw new Error("Invalid GEONIX_PROXY_URL format. Expected http://username:password@host:port");
+    throw new Error("Invalid proxy URL format. Expected http://username:password@host:port");
   }
+}
+
+function summarizeProxyFailure(
+  errors: string[],
+  emptyHtmlCount = 0,
+): { message: string; diagnostics: ScrapeDiagnostics } {
+  const sampleErrors = Array.from(new Set(errors)).slice(0, 3);
+  const blob = sampleErrors.join(" | ");
+
+  if (/Invalid proxy URL format|Incomplete proxy URL|not configured/i.test(blob)) {
+    return {
+      message: sampleErrors[0] ?? "Proxy is not configured correctly.",
+      diagnostics: {
+        reason: "proxy_not_configured",
+        blocked: false,
+        sampleErrors,
+        emptyHtmlCount,
+      },
+    };
+  }
+
+  if (/HTTP 407|Proxy Authentication Required|authentication/i.test(blob)) {
+    return {
+      message: "Proxy authentication failed. Check proxy host, port, username, and password.",
+      diagnostics: {
+        reason: "proxy_auth_failed",
+        blocked: false,
+        sampleErrors,
+        emptyHtmlCount,
+      },
+    };
+  }
+
+  if (/tunnel|ECONNRESET|ECONNREFUSED|socket|TLS|certificate/i.test(blob)) {
+    return {
+      message: "Proxy tunnel could not be established. Check proxy host, port, and provider settings.",
+      diagnostics: {
+        reason: "proxy_tunnel_failed",
+        blocked: false,
+        sampleErrors,
+        emptyHtmlCount,
+      },
+    };
+  }
+
+  if (/HTTP 403|You've been blocked|forbidden/i.test(blob)) {
+    return {
+      message: "Turo blocked the current proxy IPs. Rotate the proxy session or use a different residential endpoint.",
+      diagnostics: {
+        reason: "turo_blocked",
+        blocked: true,
+        sampleErrors,
+        emptyHtmlCount,
+      },
+    };
+  }
+
+  return {
+    message: "Proxy returned 0 vehicles across all windows. Check proxy quota, geo-targeting, or Turo access.",
+    diagnostics: {
+      reason: errors.length === 0 && emptyHtmlCount === 0 ? "unknown" : "proxy_empty",
+      blocked: false,
+      sampleErrors,
+      emptyHtmlCount,
+    },
+  };
 }
 
 type City = {
@@ -291,8 +379,9 @@ async function geonixFetch(
   url: string,
   expectJson: boolean,
   attempt = 1,
+  proxyOverride?: string | null,
 ): Promise<{ html?: string; json?: any }> {
-  const proxy = buildProxyUrl();
+  const proxy = buildProxyUrl(proxyOverride);
   if (!proxy) throw new Error("GEONIX_PROXY_URL not configured");
 
   const headers: Record<string, string> = {
@@ -335,7 +424,7 @@ async function geonixFetch(
     console.log(`geonix attempt ${attempt} failed: ${msg}`);
     if (attempt < 3) {
       await new Promise((r) => setTimeout(r, 600 * attempt));
-      return geonixFetch(url, expectJson, attempt + 1);
+      return geonixFetch(url, expectJson, attempt + 1, proxyOverride);
     }
     throw new Error(`Geonix fetch failed after 3 attempts: ${msg}`);
   }
@@ -344,7 +433,7 @@ async function geonixFetch(
 async function scrapeCity(
   supa: ReturnType<typeof createClient>,
   city: City,
-): Promise<{ vehicles: number; segments: number; error?: string }> {
+): Promise<{ vehicles: number; segments: number; error?: string; diagnostics?: ScrapeDiagnostics }> {
   // Insert run row
   const { data: runRow } = await supa
     .from("scrape_runs")
@@ -352,11 +441,13 @@ async function scrapeCity(
     .select("id")
     .single();
   const runId = runRow?.id as string | undefined;
+  let segmentsRun = 0;
+  const windowErrors: string[] = [];
+  let emptyHtmlCount = 0;
 
   try {
     // Map vehicle_id -> { vehicle, perWindow: { now, 7d, 14d, 30d } }
     const merged = new Map<string, { v: any; windows: Record<string, number> }>();
-    let segmentsRun = 0;
 
     for (const win of WINDOWS) {
       let vehicles: any[] = [];
@@ -371,7 +462,9 @@ async function scrapeCity(
           console.log(`  → API: ${vehicles.length} vehicles`);
         }
       } catch (e) {
-        console.log(`  → API failed: ${e instanceof Error ? e.message : e}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        windowErrors.push(`API ${win.key}: ${msg}`);
+        console.log(`  → API failed: ${msg}`);
       }
 
       // Strategy B: scrape the HTML search page via Geonix if API yielded nothing
@@ -388,12 +481,15 @@ async function scrapeCity(
             if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
             console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
             if (vehicles.length === 0) {
+              emptyHtmlCount++;
               const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
               console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
             }
           }
         } catch (e) {
-          console.log(`  → HTML failed: ${e instanceof Error ? e.message : e}`);
+          const msg = e instanceof Error ? e.message : String(e);
+          windowErrors.push(`HTML ${win.key}: ${msg}`);
+          console.log(`  → HTML failed: ${msg}`);
         }
       }
 
@@ -496,7 +592,8 @@ async function scrapeCity(
     }
 
     if (currentRows.length === 0) {
-      throw new Error("Geonix proxy returned 0 vehicles across all windows. Check GEONIX_PROXY_URL credentials/quota or Turo blocked the proxy.");
+      const failure = summarizeProxyFailure(windowErrors, emptyHtmlCount);
+      throw { message: failure.message, diagnostics: failure.diagnostics };
     }
 
     if (runId) {
@@ -513,7 +610,14 @@ async function scrapeCity(
 
     return { vehicles: currentRows.length, segments: segmentsRun };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = e instanceof Error
+      ? e.message
+      : typeof e === "object" && e && "message" in e
+        ? String((e as { message: unknown }).message)
+        : String(e);
+    const diagnostics = typeof e === "object" && e && "diagnostics" in e
+      ? (e as { diagnostics?: ScrapeDiagnostics }).diagnostics
+      : summarizeProxyFailure(windowErrors, emptyHtmlCount).diagnostics;
     console.error(`scrapeCity ${city.slug} failed:`, msg);
     if (runId) {
       await supa
@@ -525,7 +629,7 @@ async function scrapeCity(
         })
         .eq("id", runId);
     }
-    return { vehicles: 0, segments: 0, error: msg };
+    return { vehicles: 0, segments: segmentsRun, error: msg, diagnostics };
   }
 }
 
@@ -534,15 +638,100 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  if (!GEONIX_PROXY_URL) {
-    return new Response(
-      JSON.stringify({ error: "GEONIX_PROXY_URL not configured. Add it in Backend → Secrets." }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
-  }
-
   let body: any = {};
   try { body = await req.json(); } catch {}
+
+  if (body.test_proxy) {
+    const rawProxy = typeof body.proxy_url === "string" ? body.proxy_url : GEONIX_PROXY_URL;
+    if (!rawProxy) {
+      return jsonResponse({
+        ok: false,
+        error: "No proxy URL provided.",
+        fallback: true,
+        diagnostics: {
+          reason: "proxy_not_configured",
+          blocked: false,
+          sampleErrors: [],
+          emptyHtmlCount: 0,
+        },
+      });
+    }
+
+    try {
+      buildProxyUrl(rawProxy);
+    } catch (e) {
+      return jsonResponse({
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        fallback: true,
+        diagnostics: {
+          reason: "proxy_not_configured",
+          blocked: false,
+          sampleErrors: [],
+          emptyHtmlCount: 0,
+        },
+      });
+    }
+
+    const testCity: City = {
+      slug: "proxy-test",
+      name: "Los Angeles",
+      country: "US",
+      region: "CA",
+      latitude: 34.0522,
+      longitude: -118.2437,
+      place_id: null,
+    };
+    const apiUrl = new URL(buildApiSearchUrl(testCity, WINDOWS[0]));
+    apiUrl.searchParams.set("itemsPerPage", "1");
+
+    try {
+      const apiResp = await geonixFetch(apiUrl.toString(), true, 1, rawProxy);
+      const vehicles = apiResp.json ? extractFromJson(apiResp.json) : [];
+      if (vehicles.length > 0) {
+        return jsonResponse({
+          ok: true,
+          message: `Proxy reachable. Retrieved ${vehicles.length} vehicle${vehicles.length === 1 ? "" : "s"} from Turo API.`,
+          vehicles: vehicles.length,
+        });
+      }
+
+      return jsonResponse({
+        ok: false,
+        error: "Proxy reached Turo but returned 0 vehicles for the test search.",
+        fallback: true,
+        diagnostics: {
+          reason: "proxy_empty",
+          blocked: false,
+          sampleErrors: [],
+          emptyHtmlCount: 0,
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const failure = summarizeProxyFailure([msg], 0);
+      return jsonResponse({
+        ok: false,
+        error: failure.message,
+        fallback: true,
+        diagnostics: failure.diagnostics,
+      });
+    }
+  }
+
+  if (!GEONIX_PROXY_URL) {
+    return jsonResponse({
+      ok: false,
+      error: "GEONIX_PROXY_URL not configured. Add it in Lovable Cloud secrets.",
+      fallback: true,
+      diagnostics: {
+        reason: "proxy_not_configured",
+        blocked: false,
+        sampleErrors: [],
+        emptyHtmlCount: 0,
+      },
+    });
+  }
 
   const supa = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -564,10 +753,7 @@ Deno.serve(async (req) => {
   }
 
   if (cities.length === 0) {
-    return new Response(
-      JSON.stringify({ error: "No matching active cities found" }),
-      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    return jsonResponse({ ok: false, error: "No matching active cities found" });
   }
 
   const results: Record<string, any> = {};
@@ -575,18 +761,24 @@ Deno.serve(async (req) => {
     results[city.slug] = await scrapeCity(supa, city);
   }
 
-  // If every city failed, surface a top-level error so the UI can alert.
+  // If every city failed, return a structured response instead of a hard 502.
   const failed = Object.entries(results).filter(([, r]: any) => r?.error);
   const allFailed = failed.length === cities.length;
   if (allFailed) {
-    const firstErr = (failed[0]?.[1] as any)?.error ?? "Scrape failed";
-    return new Response(
-      JSON.stringify({ ok: false, error: firstErr, results }),
-      { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
+    const firstFailed = (failed[0]?.[1] as any) ?? {};
+    return jsonResponse({
+      ok: false,
+      error: firstFailed.error ?? "Scrape failed",
+      fallback: true,
+      diagnostics: firstFailed.diagnostics ?? {
+        reason: "unknown",
+        blocked: false,
+        sampleErrors: [],
+        emptyHtmlCount: 0,
+      },
+      results,
+    });
   }
 
-  return new Response(JSON.stringify({ ok: true, results }), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  return jsonResponse({ ok: true, results });
 });
