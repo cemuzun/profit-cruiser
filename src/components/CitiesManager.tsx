@@ -23,6 +23,19 @@ export function CitiesManager() {
     queryFn: () => ds.cities(),
   });
 
+  const { data: runs } = useQuery({
+    queryKey: ["scrape-runs"],
+    queryFn: () => ds.runs(),
+    refetchInterval: 30000,
+  });
+
+  const lastRun = runs?.[0];
+  const lastRunLabel = lastRun
+    ? `${new Date(lastRun.started_at).toLocaleString()} · ${lastRun.status}${
+        lastRun.vehicles_count != null ? ` · ${lastRun.vehicles_count} vehicles` : ""
+      }`
+    : "Never";
+
   const triggerOne = async (slug: string) => {
     setScraping(slug);
     try {
@@ -78,17 +91,20 @@ export function CitiesManager() {
               Scrapes run automatically daily at 09:00 UTC. Use Run to refresh manually.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={triggerAll}
-              disabled={scrapingAll || !cities?.some((c) => c.active)}
-            >
-              {scrapingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              Run all active
-            </Button>
-            <AddCityDialog onAdded={() => qc.invalidateQueries({ queryKey: ["cities"] })} />
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={triggerAll}
+                disabled={scrapingAll || !cities?.some((c) => c.active)}
+              >
+                {scrapingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                Run all active
+              </Button>
+              <AddCityDialog onAdded={() => qc.invalidateQueries({ queryKey: ["cities"] })} />
+            </div>
+            <p className="text-xs text-muted-foreground">Last run: {lastRunLabel}</p>
           </div>
         </div>
 
