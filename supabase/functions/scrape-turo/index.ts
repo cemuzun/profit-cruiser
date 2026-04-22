@@ -1,11 +1,14 @@
-// Turo scraper edge function — uses Geonix residential proxy ONLY.
-// No Firecrawl fallback: if Geonix fails, the run fails loudly so the
-// UI can show an alert.
+// Turo scraper edge function — uses Apify actor `backhoe/turo-daily-pricing-parser`
+// as the PRIMARY (and only) data source.
+//
+// Run mode: sync (run-sync-get-dataset-items) — we wait for the actor to finish
+// and consume the dataset items in a single HTTP call.
 //
 // Trigger:
 //   POST /scrape-turo                          → all active cities
 //   POST /scrape-turo  body { city: "los-angeles" }  → one city
 //   POST /scrape-turo  body { all: true }      → all active cities (cron)
+//   POST /scrape-turo  body { test_proxy: true } → quick connectivity test (now: Apify token check)
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -15,20 +18,22 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL");
+const APIFY_API_TOKEN = Deno.env.get("APIFY_API_TOKEN");
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-type ProxyFailureReason =
-  | "proxy_not_configured"
-  | "proxy_auth_failed"
-  | "proxy_tunnel_failed"
-  | "turo_blocked"
-  | "proxy_empty"
+// Apify actor ID — slashes must be replaced with `~` in the REST API path.
+const APIFY_ACTOR = "backhoe~turo-daily-pricing-parser";
+
+type FailureReason =
+  | "apify_not_configured"
+  | "apify_auth_failed"
+  | "apify_run_failed"
+  | "apify_empty"
   | "unknown";
 
 type ScrapeDiagnostics = {
-  reason: ProxyFailureReason;
+  reason: FailureReason;
   blocked: boolean;
   sampleErrors: string[];
   emptyHtmlCount: number;
@@ -41,91 +46,34 @@ function jsonResponse(payload: unknown, status = 200) {
   });
 }
 
-const UAS = [
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-];
-const LOCALES = ["en-US,en;q=0.9", "en-GB,en;q=0.9"];
-const pick = <T>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
-const rand = () => Math.random().toString(36).slice(2, 10);
-
-function buildProxyUrl(rawProxyUrl: string | null | undefined = GEONIX_PROXY_URL): string | null {
-  if (!rawProxyUrl) return null;
-  try {
-    const u = new URL(rawProxyUrl);
-    if (!u.protocol || !u.hostname || !u.username || !u.password) {
-      throw new Error("Incomplete proxy URL");
-    }
-    return u.toString();
-  } catch {
-    throw new Error("Invalid proxy URL format. Expected http://username:password@host:port");
-  }
-}
-
-function summarizeProxyFailure(
-  errors: string[],
-  emptyHtmlCount = 0,
-): { message: string; diagnostics: ScrapeDiagnostics } {
+function summarizeApifyFailure(errors: string[]): {
+  message: string;
+  diagnostics: ScrapeDiagnostics;
+} {
   const sampleErrors = Array.from(new Set(errors)).slice(0, 3);
   const blob = sampleErrors.join(" | ");
 
-  if (/Invalid proxy URL format|Incomplete proxy URL|not configured/i.test(blob)) {
+  if (/not configured/i.test(blob)) {
     return {
-      message: sampleErrors[0] ?? "Proxy is not configured correctly.",
-      diagnostics: {
-        reason: "proxy_not_configured",
-        blocked: false,
-        sampleErrors,
-        emptyHtmlCount,
-      },
+      message: "Apify API token not configured.",
+      diagnostics: { reason: "apify_not_configured", blocked: false, sampleErrors, emptyHtmlCount: 0 },
     };
   }
-
-  if (/HTTP 407|Proxy Authentication Required|authentication/i.test(blob)) {
+  if (/401|403|unauthor/i.test(blob)) {
     return {
-      message: "Proxy authentication failed. Check proxy host, port, username, and password.",
-      diagnostics: {
-        reason: "proxy_auth_failed",
-        blocked: false,
-        sampleErrors,
-        emptyHtmlCount,
-      },
+      message: "Apify authentication failed. Check APIFY_API_TOKEN.",
+      diagnostics: { reason: "apify_auth_failed", blocked: false, sampleErrors, emptyHtmlCount: 0 },
     };
   }
-
-  if (/tunnel|ECONNRESET|ECONNREFUSED|socket|TLS|certificate/i.test(blob)) {
+  if (/run failed|aborted|timed out|status: FAILED/i.test(blob)) {
     return {
-      message: "Proxy tunnel could not be established. Check proxy host, port, and provider settings.",
-      diagnostics: {
-        reason: "proxy_tunnel_failed",
-        blocked: false,
-        sampleErrors,
-        emptyHtmlCount,
-      },
+      message: "Apify actor run failed. See logs in Apify console.",
+      diagnostics: { reason: "apify_run_failed", blocked: false, sampleErrors, emptyHtmlCount: 0 },
     };
   }
-
-  if (/HTTP 403|You've been blocked|forbidden/i.test(blob)) {
-    return {
-      message: "Turo blocked the current proxy IPs. Rotate the proxy session or use a different residential endpoint.",
-      diagnostics: {
-        reason: "turo_blocked",
-        blocked: true,
-        sampleErrors,
-        emptyHtmlCount,
-      },
-    };
-  }
-
   return {
-    message: "Proxy returned 0 vehicles across all windows. Check proxy quota, geo-targeting, or Turo access.",
-    diagnostics: {
-      reason: errors.length === 0 && emptyHtmlCount === 0 ? "unknown" : "proxy_empty",
-      blocked: false,
-      sampleErrors,
-      emptyHtmlCount,
-    },
+    message: "Apify returned 0 vehicles for all windows.",
+    diagnostics: { reason: errors.length === 0 ? "apify_empty" : "unknown", blocked: false, sampleErrors, emptyHtmlCount: 0 },
   };
 }
 
@@ -148,13 +96,6 @@ const WINDOWS = [
 
 function isoDate(d: Date) {
   return d.toISOString().slice(0, 10);
-}
-
-function isoDateTime(d: Date) {
-  // Turo expects MM/DD/YYYY HH:mm in pickup/dropoff
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `${mm}/${dd}/${d.getUTCFullYear()}`;
 }
 
 function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
@@ -185,248 +126,91 @@ function buildSearchUrl(city: City, win: typeof WINDOWS[number]) {
   return `https://turo.com/us/en/search?${params.toString()}`;
 }
 
-// Direct JSON search API (much more reliable than parsing the HTML shell).
-function buildApiSearchUrl(city: City, win: typeof WINDOWS[number]) {
-  const start = new Date();
-  start.setUTCDate(start.getUTCDate() + win.offsetDays);
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + win.spanDays);
-  const params = new URLSearchParams({
-    country: city.country,
-    defaultZoomLevel: "11",
-    isMapSearch: "false",
-    itemsPerPage: "200",
-    latitude: String(city.latitude),
-    location: city.name,
-    locationType: "CITY",
-    longitude: String(city.longitude),
-    pickupType: "ALL",
-    region: city.region ?? "",
-    searchDurationType: "DAILY",
-    sortType: "RELEVANCE",
-    pickupDate: isoDateTime(start),
-    pickupTime: "10:00",
-    dropoffDate: isoDateTime(end),
-    dropoffTime: "10:00",
-  });
-  if (city.place_id) params.set("placeId", city.place_id);
-  return `https://turo.com/api/v2/search?${params.toString()}`;
-}
-
-// Recursively walk a JSON value and extract vehicle-shaped objects.
-function normaliseVehicle(node: any): any | null {
-  if (!node || typeof node !== "object") return null;
-  const id = node.id ?? node.vehicleId ?? node.vehicle?.id;
+// Map a single Apify dataset item to our internal vehicle shape.
+// The actor returns one record per vehicle for the given search URL,
+// so the daily price reflects the search window we requested.
+function normaliseApifyItem(item: any): any | null {
+  if (!item || typeof item !== "object") return null;
+  const id =
+    item.vehicleId ?? item.id ?? item.vehicle?.id ?? item.listingId;
   const rawPrice =
-    node.avgDailyPrice ??
-    node.dailyPrice ??
-    node.dailyPriceWithCurrency ??
-    node.dailyPricing?.dailyPrice ??
-    node.price;
+    item.avgDailyPrice ??
+    item.dailyPrice ??
+    item.dailyPricing?.dailyPrice ??
+    item.price ??
+    item.pricing?.dailyPrice;
   const price =
     rawPrice && typeof rawPrice === "object" ? rawPrice.amount : rawPrice;
-  const make = node.make ?? node.vehicle?.make ?? node.makeName;
-  const model = node.model ?? node.vehicle?.model ?? node.modelName;
-  if (!id || !price || (!make && !model)) return null;
+  const make = item.make ?? item.vehicle?.make ?? item.makeName;
+  const model = item.model ?? item.vehicle?.model ?? item.modelName;
+  if (!id || price == null || (!make && !model)) return null;
   return {
     vehicle_id: String(id),
     make: make ?? null,
     model: model ?? null,
-    year: Number(node.year ?? node.vehicle?.year) || null,
-    trim: node.trim ?? node.vehicle?.trim ?? null,
+    year: Number(item.year ?? item.vehicle?.year) || null,
+    trim: item.trim ?? item.vehicle?.trim ?? null,
     vehicle_type:
-      node.type ??
-      node.seoCategory ??
-      node.vehicleType ??
-      node.vehicle?.type ??
-      null,
-    fuel_type: node.fuelType ?? node.vehicle?.fuelType ?? null,
+      item.type ?? item.seoCategory ?? item.vehicleType ?? item.vehicle?.type ?? null,
+    fuel_type: item.fuelType ?? item.vehicle?.fuelType ?? null,
     avg_daily_price: Number(price) || null,
     completed_trips:
-      Number(node.completedTrips ?? node.numberOfTrips ?? node.tripsTaken) || 0,
-    rating: Number(node.rating ?? node.hostRating ?? node.avgRating) || null,
-    is_all_star_host: Boolean(node.isAllStarHost ?? node.host?.isAllStarHost),
-    host_id: node.hostId ?? node.host?.id ? String(node.hostId ?? node.host?.id) : null,
-    host_name: node.hostName ?? node.host?.firstName ?? null,
+      Number(item.completedTrips ?? item.numberOfTrips ?? item.tripsTaken) || 0,
+    rating: Number(item.rating ?? item.hostRating ?? item.avgRating) || null,
+    is_all_star_host: Boolean(item.isAllStarHost ?? item.host?.isAllStarHost),
+    host_id:
+      item.hostId ?? item.host?.id ? String(item.hostId ?? item.host?.id) : null,
+    host_name: item.hostName ?? item.host?.firstName ?? null,
     image_url:
-      node.images?.[0]?.originalImageUrl ??
-      node.images?.[0]?.url ??
-      node.imageUrls?.[0] ??
-      node.image?.originalImageUrl ??
+      item.images?.[0]?.originalImageUrl ??
+      item.images?.[0]?.url ??
+      item.imageUrls?.[0] ??
+      item.image?.originalImageUrl ??
+      item.imageUrl ??
       null,
-    location_city: node.location?.city ?? node.locationCity ?? null,
-    location_state: node.location?.state ?? node.locationState ?? null,
-    latitude: Number(node.location?.latitude ?? node.latitude) || null,
-    longitude: Number(node.location?.longitude ?? node.longitude) || null,
+    location_city: item.location?.city ?? item.locationCity ?? null,
+    location_state: item.location?.state ?? item.locationState ?? null,
+    latitude: Number(item.location?.latitude ?? item.latitude) || null,
+    longitude: Number(item.location?.longitude ?? item.longitude) || null,
   };
 }
 
-function extractFromJson(root: any): any[] {
-  const out: any[] = [];
-  const seen = new Set<string>();
-  function walk(v: any, depth = 0) {
-    if (depth > 12 || v == null) return;
-    if (Array.isArray(v)) {
-      for (const x of v) walk(x, depth + 1);
-      return;
-    }
-    if (typeof v === "object") {
-      const n = normaliseVehicle(v);
-      if (n && !seen.has(n.vehicle_id)) {
-        seen.add(n.vehicle_id);
-        out.push(n);
-      }
-      for (const k in v) walk(v[k], depth + 1);
-    }
-  }
-  walk(root);
-  return out;
-}
+// Call the Apify actor in sync mode and return the dataset items.
+async function runApify(
+  searchUrls: string[],
+  tokenOverride?: string | null,
+): Promise<any[]> {
+  const token = tokenOverride ?? APIFY_API_TOKEN;
+  if (!token) throw new Error("APIFY_API_TOKEN not configured");
 
-// Try to extract __NEXT_DATA__ JSON blob from raw HTML (legacy Next.js)
-function extractNextData(html: string): any | null {
-  const m = html.match(
-    /<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
-  );
-  if (!m) return null;
+  // run-sync-get-dataset-items: starts the run, waits for it to finish, returns dataset items.
+  // We pass a generous timeout (10 min). The actor's typical input is a list of search URLs.
+  const url =
+    `https://api.apify.com/v2/acts/${APIFY_ACTOR}/run-sync-get-dataset-items` +
+    `?token=${encodeURIComponent(token)}&timeout=540&format=json`;
+
+  const input = {
+    startUrls: searchUrls.map((u) => ({ url: u })),
+    searchUrls, // some actors accept this alternate shape
+    maxItems: 1000,
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(580_000),
+  });
+
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`Apify HTTP ${res.status}: ${text.slice(0, 300)}`);
+  }
   try {
-    return JSON.parse(m[1]);
+    const data = JSON.parse(text);
+    return Array.isArray(data) ? data : [];
   } catch {
-    return null;
-  }
-}
-
-// Modern Next.js (app router) streams data via self.__next_f.push([1, "...json..."])
-// Concatenate all those payloads, then scan for vehicle-shaped JSON.
-function extractFromNextStreaming(html: string): any[] {
-  const re = /self\.__next_f\.push\(\s*\[\s*\d+\s*,\s*("(?:\\.|[^"\\])*")\s*\]\s*\)/g;
-  const chunks: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    try {
-      const decoded = JSON.parse(m[1]); // unwrap the JS string literal
-      chunks.push(decoded);
-    } catch {}
-  }
-  if (chunks.length === 0) return [];
-  const blob = chunks.join("");
-  return extractVehiclesFromBlob(blob);
-}
-
-// Last-resort: scan raw HTML for embedded JSON objects that look like vehicles.
-function extractFromHtmlScan(html: string): any[] {
-  return extractVehiclesFromBlob(html);
-}
-
-// Find {...} substrings that contain vehicle-ish keys, parse, normalise.
-function extractVehiclesFromBlob(blob: string): any[] {
-  const out: any[] = [];
-  const seen = new Set<string>();
-  // Match top-level vehicle object snippets — heuristic: look for "vehicleId" or "avgDailyPrice"
-  const idRe = /"(?:vehicleId|id)"\s*:\s*"?(\d{5,})"?/g;
-  let m: RegExpExecArray | null;
-  while ((m = idRe.exec(blob)) !== null) {
-    // Find the surrounding {...} by walking back/forward balancing braces
-    const start = findObjectStart(blob, m.index);
-    if (start < 0) continue;
-    const end = findObjectEnd(blob, start);
-    if (end < 0) continue;
-    const candidate = blob.slice(start, end + 1);
-    try {
-      const obj = JSON.parse(candidate);
-      const v = normaliseVehicle(obj);
-      if (v && !seen.has(v.vehicle_id)) {
-        seen.add(v.vehicle_id);
-        out.push(v);
-      }
-    } catch {}
-    idRe.lastIndex = end + 1;
-  }
-  return out;
-}
-
-function findObjectStart(s: string, fromIdx: number): number {
-  let depth = 0;
-  for (let i = fromIdx; i >= 0; i--) {
-    const c = s[i];
-    if (c === "}") depth++;
-    else if (c === "{") {
-      if (depth === 0) return i;
-      depth--;
-    }
-  }
-  return -1;
-}
-
-function findObjectEnd(s: string, fromIdx: number): number {
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = fromIdx; i < s.length; i++) {
-    const c = s[i];
-    if (esc) { esc = false; continue; }
-    if (c === "\\") { esc = true; continue; }
-    if (c === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (c === "{") depth++;
-    else if (c === "}") { depth--; if (depth === 0) return i; }
-  }
-  return -1;
-}
-
-// Geonix-proxied fetch with rotating session + UA. Throws on failure.
-async function geonixFetch(
-  url: string,
-  expectJson: boolean,
-  attempt = 1,
-  proxyOverride?: string | null,
-): Promise<{ html?: string; json?: any }> {
-  const proxy = buildProxyUrl(proxyOverride);
-  if (!proxy) throw new Error("GEONIX_PROXY_URL not configured");
-
-  const headers: Record<string, string> = {
-    "User-Agent": pick(UAS),
-    "Accept": expectJson
-      ? "application/json, text/plain, */*"
-      : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": pick(LOCALES),
-    "Referer": "https://turo.com/us/en/search",
-  };
-  if (expectJson) headers["x-requested-with"] = "XMLHttpRequest";
-
-  try {
-    const init: RequestInit & { client?: Deno.HttpClient } = {
-      headers,
-      signal: AbortSignal.timeout(30000),
-    };
-    // @ts-ignore - createHttpClient is available in Deno Deploy edge runtime
-    const client = Deno.createHttpClient({ proxy: { url: proxy } });
-    init.client = client;
-
-    const res = await fetch(url, init);
-    const text = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-
-    if (expectJson) {
-      try {
-        return { json: JSON.parse(text) };
-      } catch {
-        const m = text.match(/\{[\s\S]*\}/);
-        if (m) {
-          try { return { json: JSON.parse(m[0]) }; } catch {}
-        }
-        throw new Error("Geonix returned non-JSON for API endpoint");
-      }
-    }
-    return { html: text };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.log(`geonix attempt ${attempt} failed: ${msg}`);
-    if (attempt < 3) {
-      await new Promise((r) => setTimeout(r, 600 * attempt));
-      return geonixFetch(url, expectJson, attempt + 1, proxyOverride);
-    }
-    throw new Error(`Geonix fetch failed after 3 attempts: ${msg}`);
+    throw new Error(`Apify returned non-JSON response: ${text.slice(0, 200)}`);
   }
 }
 
@@ -434,7 +218,6 @@ async function scrapeCity(
   supa: ReturnType<typeof createClient>,
   city: City,
 ): Promise<{ vehicles: number; segments: number; error?: string; diagnostics?: ScrapeDiagnostics }> {
-  // Insert run row
   const { data: runRow } = await supa
     .from("scrape_runs")
     .insert({ city: city.slug, status: "running" })
@@ -443,55 +226,30 @@ async function scrapeCity(
   const runId = runRow?.id as string | undefined;
   let segmentsRun = 0;
   const windowErrors: string[] = [];
-  let emptyHtmlCount = 0;
 
   try {
     // Map vehicle_id -> { vehicle, perWindow: { now, 7d, 14d, 30d } }
     const merged = new Map<string, { v: any; windows: Record<string, number> }>();
 
+    // We call Apify ONCE per window so each vehicle's price reflects that window.
     for (const win of WINDOWS) {
-      let vehicles: any[] = [];
+      const searchUrl = buildSearchUrl(city, win);
+      console.log(`[${city.slug}/${win.key}] apify ${searchUrl.slice(0, 110)}...`);
 
-      // Strategy A: hit Turo's JSON API directly via Geonix
-      const apiUrl = buildApiSearchUrl(city, win);
-      console.log(`[${city.slug}/${win.key}] API(geonix) ${apiUrl.slice(0, 110)}...`);
+      let items: any[] = [];
       try {
-        const apiResp = await geonixFetch(apiUrl, true);
-        if (apiResp.json) {
-          vehicles = extractFromJson(apiResp.json);
-          console.log(`  → API: ${vehicles.length} vehicles`);
-        }
+        items = await runApify([searchUrl]);
+        console.log(`  → apify returned ${items.length} raw items`);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        windowErrors.push(`API ${win.key}: ${msg}`);
-        console.log(`  → API failed: ${msg}`);
+        windowErrors.push(`${win.key}: ${msg}`);
+        console.log(`  → apify failed: ${msg}`);
       }
 
-      // Strategy B: scrape the HTML search page via Geonix if API yielded nothing
-      if (vehicles.length === 0) {
-        const htmlUrl = buildSearchUrl(city, win);
-        console.log(`[${city.slug}/${win.key}] HTML(geonix) ${htmlUrl.slice(0, 100)}...`);
-        try {
-          const htmlResp = await geonixFetch(htmlUrl, false);
-          const html = htmlResp.html;
-          if (html) {
-            const next = extractNextData(html);
-            if (next) vehicles = extractFromJson(next);
-            if (vehicles.length === 0) vehicles = extractFromNextStreaming(html);
-            if (vehicles.length === 0) vehicles = extractFromHtmlScan(html);
-            console.log(`  → HTML: ${vehicles.length} vehicles (htmlLen=${html.length})`);
-            if (vehicles.length === 0) {
-              emptyHtmlCount++;
-              const hasCfChallenge = /challenge-platform|cf-mitigated|Just a moment/i.test(html);
-              console.log(`    diag: cfChallenge=${hasCfChallenge}, sample=${html.slice(0, 200).replace(/\s+/g, " ")}`);
-            }
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          windowErrors.push(`HTML ${win.key}: ${msg}`);
-          console.log(`  → HTML failed: ${msg}`);
-        }
-      }
+      const vehicles = items
+        .map(normaliseApifyItem)
+        .filter((v): v is any => v != null);
+      console.log(`  → normalised ${vehicles.length} vehicles`);
 
       segmentsRun++;
       for (const v of vehicles) {
@@ -510,7 +268,6 @@ async function scrapeCity(
     const all = Array.from(merged.values());
     const now = new Date().toISOString();
 
-    // Build records for listings_current + listings_snapshots
     const currentRows = all.map(({ v, windows }) => ({
       vehicle_id: v.vehicle_id,
       city: city.slug,
@@ -539,13 +296,9 @@ async function scrapeCity(
       updated_at: now,
     }));
 
-    const snapshotRows = currentRows.map((r) => ({
-      ...r,
-      scraped_at: now,
-    }));
+    const snapshotRows = currentRows.map((r) => ({ ...r, scraped_at: now }));
 
     if (currentRows.length > 0) {
-      // Upsert into listings_current
       for (let i = 0; i < currentRows.length; i += 200) {
         const chunk = currentRows.slice(i, i + 200);
         const { error } = await supa
@@ -553,14 +306,12 @@ async function scrapeCity(
           .upsert(chunk, { onConflict: "vehicle_id" });
         if (error) console.error("upsert listings_current:", error.message);
       }
-      // Insert into listings_snapshots
       for (let i = 0; i < snapshotRows.length; i += 200) {
         const chunk = snapshotRows.slice(i, i + 200);
         const { error } = await supa.from("listings_snapshots").insert(chunk);
         if (error) console.error("insert listings_snapshots:", error.message);
       }
 
-      // Forecast rows (one per window per vehicle that has data)
       const forecasts: any[] = [];
       for (const { v, windows } of all) {
         for (const w of ["7d", "14d", "30d"] as const) {
@@ -592,7 +343,7 @@ async function scrapeCity(
     }
 
     if (currentRows.length === 0) {
-      const failure = summarizeProxyFailure(windowErrors, emptyHtmlCount);
+      const failure = summarizeApifyFailure(windowErrors);
       throw { message: failure.message, diagnostics: failure.diagnostics };
     }
 
@@ -617,7 +368,7 @@ async function scrapeCity(
         : String(e);
     const diagnostics = typeof e === "object" && e && "diagnostics" in e
       ? (e as { diagnostics?: ScrapeDiagnostics }).diagnostics
-      : summarizeProxyFailure(windowErrors, emptyHtmlCount).diagnostics;
+      : summarizeApifyFailure(windowErrors).diagnostics;
     console.error(`scrapeCity ${city.slug} failed:`, msg);
     if (runId) {
       await supa
@@ -641,35 +392,14 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch {}
 
+  // Connectivity test: try a single small Apify run for Los Angeles.
   if (body.test_proxy) {
-    const rawProxy = typeof body.proxy_url === "string" ? body.proxy_url : GEONIX_PROXY_URL;
-    if (!rawProxy) {
+    if (!APIFY_API_TOKEN) {
       return jsonResponse({
         ok: false,
-        error: "No proxy URL provided.",
+        error: "APIFY_API_TOKEN not configured.",
         fallback: true,
-        diagnostics: {
-          reason: "proxy_not_configured",
-          blocked: false,
-          sampleErrors: [],
-          emptyHtmlCount: 0,
-        },
-      });
-    }
-
-    try {
-      buildProxyUrl(rawProxy);
-    } catch (e) {
-      return jsonResponse({
-        ok: false,
-        error: e instanceof Error ? e.message : String(e),
-        fallback: true,
-        diagnostics: {
-          reason: "proxy_not_configured",
-          blocked: false,
-          sampleErrors: [],
-          emptyHtmlCount: 0,
-        },
+        diagnostics: { reason: "apify_not_configured", blocked: false, sampleErrors: [], emptyHtmlCount: 0 },
       });
     }
 
@@ -682,34 +412,27 @@ Deno.serve(async (req) => {
       longitude: -118.2437,
       place_id: null,
     };
-    const apiUrl = new URL(buildApiSearchUrl(testCity, WINDOWS[0]));
-    apiUrl.searchParams.set("itemsPerPage", "1");
+    const url = buildSearchUrl(testCity, WINDOWS[0]);
 
     try {
-      const apiResp = await geonixFetch(apiUrl.toString(), true, 1, rawProxy);
-      const vehicles = apiResp.json ? extractFromJson(apiResp.json) : [];
+      const items = await runApify([url]);
+      const vehicles = items.map(normaliseApifyItem).filter(Boolean);
       if (vehicles.length > 0) {
         return jsonResponse({
           ok: true,
-          message: `Proxy reachable. Retrieved ${vehicles.length} vehicle${vehicles.length === 1 ? "" : "s"} from Turo API.`,
+          message: `Apify reachable. Retrieved ${vehicles.length} vehicle${vehicles.length === 1 ? "" : "s"}.`,
           vehicles: vehicles.length,
         });
       }
-
       return jsonResponse({
         ok: false,
-        error: "Proxy reached Turo but returned 0 vehicles for the test search.",
+        error: "Apify ran successfully but returned 0 vehicles for the test search.",
         fallback: true,
-        diagnostics: {
-          reason: "proxy_empty",
-          blocked: false,
-          sampleErrors: [],
-          emptyHtmlCount: 0,
-        },
+        diagnostics: { reason: "apify_empty", blocked: false, sampleErrors: [], emptyHtmlCount: 0 },
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      const failure = summarizeProxyFailure([msg], 0);
+      const failure = summarizeApifyFailure([msg]);
       return jsonResponse({
         ok: false,
         error: failure.message,
@@ -719,23 +442,17 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (!GEONIX_PROXY_URL) {
+  if (!APIFY_API_TOKEN) {
     return jsonResponse({
       ok: false,
-      error: "GEONIX_PROXY_URL not configured. Add it in Lovable Cloud secrets.",
+      error: "APIFY_API_TOKEN not configured. Add it in Lovable Cloud secrets.",
       fallback: true,
-      diagnostics: {
-        reason: "proxy_not_configured",
-        blocked: false,
-        sampleErrors: [],
-        emptyHtmlCount: 0,
-      },
+      diagnostics: { reason: "apify_not_configured", blocked: false, sampleErrors: [], emptyHtmlCount: 0 },
     });
   }
 
   const supa = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // Determine which cities to scrape
   let cities: City[] = [];
   if (body.city && typeof body.city === "string") {
     const { data } = await supa
@@ -761,7 +478,6 @@ Deno.serve(async (req) => {
     results[city.slug] = await scrapeCity(supa, city);
   }
 
-  // If every city failed, return a structured response instead of a hard 502.
   const failed = Object.entries(results).filter(([, r]: any) => r?.error);
   const allFailed = failed.length === cities.length;
   if (allFailed) {
