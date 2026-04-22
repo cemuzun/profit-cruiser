@@ -534,9 +534,9 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  if (!FIRECRAWL_API_KEY) {
+  if (!GEONIX_PROXY_URL) {
     return new Response(
-      JSON.stringify({ error: "FIRECRAWL_API_KEY not configured" }),
+      JSON.stringify({ error: "GEONIX_PROXY_URL not configured. Add it in Backend → Secrets." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
