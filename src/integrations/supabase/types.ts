@@ -14,6 +14,42 @@ export type Database = {
   }
   public: {
     Tables: {
+      cities: {
+        Row: {
+          active: boolean
+          country: string
+          created_at: string
+          latitude: number
+          longitude: number
+          name: string
+          place_id: string | null
+          region: string | null
+          slug: string
+        }
+        Insert: {
+          active?: boolean
+          country?: string
+          created_at?: string
+          latitude: number
+          longitude: number
+          name: string
+          place_id?: string | null
+          region?: string | null
+          slug: string
+        }
+        Update: {
+          active?: boolean
+          country?: string
+          created_at?: string
+          latitude?: number
+          longitude?: number
+          name?: string
+          place_id?: string | null
+          region?: string | null
+          slug?: string
+        }
+        Relationships: []
+      }
       cost_assumptions_global: {
         Row: {
           cleaning_per_trip: number
