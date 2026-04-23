@@ -32,13 +32,10 @@ const CITIES: Record<string, {
 
 // Slim segments for edge function (60s wall-clock budget per call).
 const PRICE_SEGMENTS: [number, number][] = [
-  [0, 60], [60, 100], [100, 150], [150, 250], [250, 1000],
+  [0, 80], [80, 150], [150, 1000],
 ];
 const WINDOWS = [
   { key: "now", offsetDays: 1,  spanDays: 3, label: "Now" },
-  { key: "7d",  offsetDays: 7,  spanDays: 3, label: "+7d" },
-  { key: "14d", offsetDays: 14, spanDays: 3, label: "+14d" },
-  { key: "30d", offsetDays: 30, spanDays: 3, label: "+30d" },
 ];
 
 function isoDate(d: Date) { return d.toISOString().slice(0, 10); }
@@ -303,22 +300,34 @@ Deno.serve(async (req) => {
     await supa.from("scrape_runs").insert(rest.map((c) => ({ city: c, status: "pending" })));
   }
 
-  try {
-    const result = await scrapeCity(supa, firstCity, runRow.id);
-    return jsonResponse({
-      ok: true,
-      city: firstCity,
-      ...result,
-      queued: rest,
-      message: `Scraped ${result.vehicles} vehicles from ${firstCity} via Zyte. ${rest.length} city/cities queued.`,
-    });
-  } catch (e) {
-    const msg = (e as Error).message;
-    await supa.from("scrape_runs").update({
-      status: "failed",
-      finished_at: new Date().toISOString(),
-      error_message: msg,
-    }).eq("id", runRow.id);
-    return jsonResponse({ ok: false, error: msg }, 500);
+  // Run scrape in background — don't block the HTTP response on Zyte calls
+  // (each segment can take 10-15s; 150s edge timeout would kill us).
+  const work = (async () => {
+    try {
+      const result = await scrapeCity(supa, firstCity, runRow.id);
+      console.log(`[scrape-turo] ${firstCity} done:`, result);
+    } catch (e) {
+      const msg = (e as Error).message;
+      console.error(`[scrape-turo] ${firstCity} failed:`, msg);
+      await supa.from("scrape_runs").update({
+        status: "failed",
+        finished_at: new Date().toISOString(),
+        error_message: msg,
+      }).eq("id", runRow.id);
+    }
+  })();
+
+  // @ts-ignore EdgeRuntime is available in Supabase edge runtime
+  if (typeof EdgeRuntime !== "undefined" && EdgeRuntime.waitUntil) {
+    // @ts-ignore
+    EdgeRuntime.waitUntil(work);
   }
+
+  return jsonResponse({
+    ok: true,
+    city: firstCity,
+    runId: runRow.id,
+    queued: rest,
+    message: `Scrape started in background for ${firstCity}. Watch the runs list — status will flip to 'succeeded' when done (~30-60s).`,
+  }, 202);
 });
