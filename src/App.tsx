@@ -8,10 +8,10 @@ import CarDetail from "./pages/CarDetail.tsx";
 import Analyzer from "./pages/Analyzer.tsx";
 import Watchlist from "./pages/Watchlist.tsx";
 import Settings from "./pages/Settings.tsx";
-
 import Seasonality from "./pages/Seasonality.tsx";
 import Compare from "./pages/Compare.tsx";
 import NotFound from "./pages/NotFound.tsx";
+import Cities from "./pages/Cities.tsx";
 
 const queryClient = new QueryClient();
 
@@ -23,6 +23,7 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/cities" element={<Cities />} />
           <Route path="/car/:id" element={<CarDetail />} />
           <Route path="/analyzer" element={<Analyzer />} />
           <Route path="/watchlist" element={<Watchlist />} />
