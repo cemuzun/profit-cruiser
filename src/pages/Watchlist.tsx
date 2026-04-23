@@ -103,7 +103,7 @@ export default function Watchlist() {
                       <div className="flex-1">
                         {c.image_url && (
                           <a
-                            href={turoCarUrl(c.vehicle_id, (c as any).listing_url)}
+                            href={turoCarUrl(c.vehicle_id, (c as any).listing_url, { city: c.location_city ?? c.city, make: c.make, model: c.model, vehicle_type: c.vehicle_type })}
                             target="_blank"
                             rel="noopener noreferrer"
                             title="Open on Turo"
@@ -115,7 +115,7 @@ export default function Watchlist() {
                     </div>
                     <div className="flex items-center justify-between">
                       <a
-                        href={turoCarUrl(c.vehicle_id, (c as any).listing_url)}
+                        href={turoCarUrl(c.vehicle_id, (c as any).listing_url, { city: c.location_city ?? c.city, make: c.make, model: c.model, vehicle_type: c.vehicle_type })}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="font-semibold hover:underline"
