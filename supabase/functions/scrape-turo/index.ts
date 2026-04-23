@@ -191,35 +191,12 @@ async function discoverVehicleIds(
 ): Promise<FoundVehicle[]> {
   const found = new Map<string, FoundVehicle>();
 
-  // --- Step 1: Turo /search endpoint (up to 200 results per request) ---
-  // First an unfiltered pull, then split by price buckets to exceed the cap.
-  console.log(`[search] unfiltered`);
-  try {
-    const res = await zyteText(buildSearchUrl(city), { browser: true });
-    if (res.status === 200) {
-      const added = harvestFromHtml(res.body, found);
-      console.log(`  search unfiltered: +${added} (total ${found.size})`);
-    } else {
-      console.warn(`  search unfiltered: status ${res.status}`);
-    }
-  } catch (e) {
-    console.warn(`  search unfiltered failed:`, e);
-  }
+  // NOTE: Turo's /search page loads results via XHR — even with JS rendering
+  // it only returns ~4-6 vehicles per request and is very slow (3+ min for 9
+  // requests). Category landing pages are SSR'd and return 30-40 per page,
+  // so we rely solely on them.
 
-  for (const [lo, hi] of PRICE_BUCKETS) {
-    try {
-      const res = await zyteText(buildSearchUrl(city, { minPrice: lo, maxPrice: hi }), { browser: true });
-      if (res.status !== 200) continue;
-      const added = harvestFromHtml(res.body, found);
-      console.log(`  search $${lo}-${hi}: +${added} (total ${found.size})`);
-    } catch (e) {
-      console.warn(`  search $${lo}-${hi} failed:`, e);
-    }
-  }
-
-  console.log(`[search] done with ${found.size} vehicles, falling back to category pages`);
-
-  // --- Step 2: Category landing pages as fallback (catches anything missed) ---
+  // --- Category landing pages (SSR, fast, 30-40 vehicles per page) ---
   // Category fallback uses a city-scoped regex to avoid mis-attributing vehicles.
   const cityRe = new RegExp(
     `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
