@@ -100,15 +100,98 @@ const PRICE_BUCKETS: Array<[number, number]> = [
   [800, 5000],
 ];
 
-async function discoverVehicleIds(citySlugInUrl: string): Promise<
-  Array<{ id: string; href: string; make: string; model: string; type: string }>
-> {
-  const found = new Map<string, { id: string; href: string; make: string; model: string; type: string }>();
-  const re = new RegExp(
-    `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
-    "g",
-  );
+// Generic regex that matches any Turo vehicle detail URL inside a search/landing page.
+// Captures: type slug, make slug, model slug, numeric vehicle id.
+const VEHICLE_URL_RE =
+  /\/us\/en\/([a-z-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8})/g;
 
+type FoundVehicle = { id: string; href: string; make: string; model: string; type: string };
+
+function harvestFromHtml(
+  html: string,
+  found: Map<string, FoundVehicle>,
+): number {
+  const before = found.size;
+  VEHICLE_URL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = VEHICLE_URL_RE.exec(html)) !== null) {
+    const [whole, type, make, model, id] = m;
+    if (!found.has(id)) {
+      found.set(id, {
+        id,
+        href: `https://turo.com${whole}`,
+        make: make.replace(/-/g, " "),
+        model: model.replace(/-/g, " "),
+        type,
+      });
+    }
+  }
+  return found.size - before;
+}
+
+// Build Turo /search URL for a city using its coordinates + place_id.
+function buildSearchUrl(
+  city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
+  opts: { minPrice?: number; maxPrice?: number } = {},
+): string {
+  const params = new URLSearchParams({
+    age: "30",
+    country: "US",
+    defaultZoomLevel: "11",
+    deliveryLocationType: "city",
+    isMapSearch: "false",
+    itemsPerPage: "200",
+    latitude: String(city.latitude),
+    longitude: String(city.longitude),
+    location: `${city.name}, ${city.region ?? ""}, USA`.replace(/, ,/g, ","),
+    locationType: "CITY",
+    pickupType: "ALL",
+    region: city.region ?? "",
+    searchDurationType: "DAILY",
+    sortType: "RELEVANCE",
+    flexibleType: "NOT_FLEXIBLE",
+  });
+  if (city.place_id) params.set("placeId", city.place_id);
+  if (opts.minPrice != null) params.set("minDailyPrice", String(opts.minPrice));
+  if (opts.maxPrice != null) params.set("maxDailyPrice", String(opts.maxPrice));
+  return `https://turo.com/us/en/search?${params.toString()}`;
+}
+
+async function discoverVehicleIds(
+  city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
+  citySlugInUrl: string,
+): Promise<FoundVehicle[]> {
+  const found = new Map<string, FoundVehicle>();
+
+  // --- Step 1: Turo /search endpoint (up to 200 results per request) ---
+  // First an unfiltered pull, then split by price buckets to exceed the cap.
+  console.log(`[search] unfiltered`);
+  try {
+    const res = await zyteText(buildSearchUrl(city));
+    if (res.status === 200) {
+      const added = harvestFromHtml(res.body, found);
+      console.log(`  search unfiltered: +${added} (total ${found.size})`);
+    } else {
+      console.warn(`  search unfiltered: status ${res.status}`);
+    }
+  } catch (e) {
+    console.warn(`  search unfiltered failed:`, e);
+  }
+
+  for (const [lo, hi] of PRICE_BUCKETS) {
+    try {
+      const res = await zyteText(buildSearchUrl(city, { minPrice: lo, maxPrice: hi }));
+      if (res.status !== 200) continue;
+      const added = harvestFromHtml(res.body, found);
+      console.log(`  search $${lo}-${hi}: +${added} (total ${found.size})`);
+    } catch (e) {
+      console.warn(`  search $${lo}-${hi} failed:`, e);
+    }
+  }
+
+  console.log(`[search] done with ${found.size} vehicles, falling back to category pages`);
+
+  // --- Step 2: Category landing pages as fallback (catches anything missed) ---
   for (const cat of CATEGORY_SLUGS) {
     for (const [lo, hi] of PRICE_BUCKETS) {
       const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`;
