@@ -1,5 +1,0 @@
-# Every 12h: 08:00 and 20:00 UTC — full scrape of all cities
-0 8,20 * * * root cd /app && /usr/bin/npm run scrape >> /var/log/cron.log 2>&1
-# Every minute: drain any 'pending' scrape_runs queued by the dashboard button
-* * * * * root cd /app && /usr/bin/npm run queue >> /var/log/cron.log 2>&1
-# Required trailing newline
