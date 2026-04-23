@@ -116,6 +116,10 @@ const PRICE_BUCKETS: Array<[number, number]> = [
 const VEHICLE_URL_RE =
   /\/us\/en\/([a-z-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8})/g;
 
+// Newer Turo detail URL: /us/en/car-details/{id}. These don't include make/model
+// in the URL — we'll get those from the JSON-LD on the detail page.
+const CAR_DETAILS_RE = /\/us\/en\/car-details\/(\d{4,8})/g;
+
 type FoundVehicle = { id: string; href: string; make: string; model: string; type: string };
 
 function harvestFromHtml(
@@ -134,6 +138,19 @@ function harvestFromHtml(
         make: make.replace(/-/g, " "),
         model: model.replace(/-/g, " "),
         type,
+      });
+    }
+  }
+  CAR_DETAILS_RE.lastIndex = 0;
+  while ((m = CAR_DETAILS_RE.exec(html)) !== null) {
+    const id = m[1];
+    if (!found.has(id)) {
+      found.set(id, {
+        id,
+        href: `https://turo.com/us/en/car-details/${id}`,
+        make: "",
+        model: "",
+        type: "car-rental",
       });
     }
   }
