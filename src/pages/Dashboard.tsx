@@ -272,6 +272,26 @@ export default function Dashboard() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="max-w-xs"
               />
+              <Input
+                placeholder="Filter city…"
+                value={cityFilter}
+                onChange={(e) => setCityFilter(e.target.value)}
+                className="w-[140px]"
+              />
+              <Input
+                placeholder="Min $"
+                value={minPrice}
+                onChange={(e) => setMinPrice(e.target.value.replace(/[^\d.]/g, ""))}
+                className="w-[90px]"
+                inputMode="decimal"
+              />
+              <Input
+                placeholder="Max $"
+                value={maxPrice}
+                onChange={(e) => setMaxPrice(e.target.value.replace(/[^\d.]/g, ""))}
+                className="w-[90px]"
+                inputMode="decimal"
+              />
               <Select value={fuelType} onValueChange={setFuelType}>
                 <SelectTrigger className="w-[140px]"><SelectValue placeholder="Fuel" /></SelectTrigger>
                 <SelectContent>
@@ -282,15 +302,15 @@ export default function Dashboard() {
                   <SelectItem value="DIESEL">Diesel</SelectItem>
                 </SelectContent>
               </Select>
-              <Select value={sortBy} onValueChange={(v: any) => setSortBy(v)}>
-                <SelectTrigger className="w-[180px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="profit">Sort: Monthly profit</SelectItem>
-                  <SelectItem value="price">Sort: Daily price</SelectItem>
-                  <SelectItem value="trips">Sort: Trips completed</SelectItem>
-                  <SelectItem value="rating">Sort: Rating</SelectItem>
-                </SelectContent>
-              </Select>
+              {(search || cityFilter || minPrice || maxPrice || fuelType !== "all") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { setSearch(""); setCityFilter(""); setMinPrice(""); setMaxPrice(""); setFuelType("all"); }}
+                >
+                  Clear
+                </Button>
+              )}
               <div className="ml-auto text-xs text-muted-foreground">
                 {enriched.length} cars
               </div>
@@ -307,16 +327,16 @@ export default function Dashboard() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Vehicle</TableHead>
-                      <TableHead>City</TableHead>
-                      <TableHead className="text-right">Now $/day</TableHead>
-                      <TableHead className="text-right">7d avg</TableHead>
-                      <TableHead className="text-right">14d avg</TableHead>
-                      <TableHead className="text-right">30d avg</TableHead>
-                      <TableHead className="text-right">Trips</TableHead>
-                      <TableHead className="text-right">Rating</TableHead>
-                      <TableHead className="text-right">Monthly profit</TableHead>
-                      <TableHead className="text-right">Margin</TableHead>
+                      <SortableHead k="vehicle" label="Vehicle" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="city" label="City" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="price" label="Now $/day" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="p7" label="7d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="p14" label="14d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="p30" label="30d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="trips" label="Trips" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="rating" label="Rating" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="profit" label="Monthly profit" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="margin" label="Margin" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <TableHead>Verdict</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
