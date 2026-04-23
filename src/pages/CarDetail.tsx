@@ -181,7 +181,7 @@ export default function CarDetail() {
               <div className="flex items-start gap-4">
                 {car.image_url && (
                   <a
-                    href={turoCarUrl(car.vehicle_id)}
+                    href={turoCarUrl(car.vehicle_id, (car as any).listing_url, { city: car.location_city ?? car.city, make: car.make, model: car.model, vehicle_type: car.vehicle_type })}
                     target="_blank"
                     rel="noopener noreferrer"
                     title="Open on Turo"
@@ -192,7 +192,7 @@ export default function CarDetail() {
                 <div className="flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <a
-                      href={turoCarUrl(car.vehicle_id)}
+                      href={turoCarUrl(car.vehicle_id, (car as any).listing_url, { city: car.location_city ?? car.city, make: car.make, model: car.model, vehicle_type: car.vehicle_type })}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-2xl font-bold hover:underline inline-flex items-center gap-1.5"
