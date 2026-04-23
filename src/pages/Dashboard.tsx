@@ -21,6 +21,7 @@ import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
 } from "recharts";
 import { format } from "date-fns";
+import { ScrapeProgress } from "@/components/ScrapeProgress";
 
 type SortKey = "vehicle" | "city" | "price" | "p7" | "p14" | "p30" | "trips" | "rating" | "profit" | "margin";
 type SortDir = "asc" | "desc";
