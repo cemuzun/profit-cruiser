@@ -180,8 +180,13 @@ export const ds = {
       .eq("slug", slug);
     if (error) throw error;
   },
-  async triggerScrape(_citySlug?: string) {
-    throw new Error("Scraping is not configured. Data ingestion will be set up separately.");
+  async triggerScrape(citySlug?: string) {
+    if (!citySlug) throw new Error("city is required");
+    const { data, error } = await supabase.functions.invoke("scrape-turo", {
+      body: { city: citySlug, background: true },
+    });
+    if (error) throw error;
+    return data;
   },
 };
 
