@@ -1,7 +1,7 @@
-// Turo scraper using Zyte API (browserHtml + Cloudflare bypass).
-// POST { city: "los-angeles" } — looks up coords from `cities`, calls Zyte
-// for the Turo search page, parses __NEXT_DATA__ vehicles, upserts into
-// listings_current + listings_snapshots + price_forecasts, logs scrape_runs.
+// Turo scraper using Zyte API as a proxy to Turo's internal search JSON API.
+// Turo's search page is client-rendered, so __NEXT_DATA__ is empty. Instead we
+// hit https://turo.com/api/v2/search (the same endpoint the SPA uses) through
+// Zyte's httpResponseBody+anti-bot to bypass Cloudflare. Returns JSON directly.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -17,9 +17,7 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-type ZyteResponse = { browserHtml?: string; statusCode?: number };
-
-async function zyteFetch(url: string): Promise<string> {
+async function zyteJson(url: string): Promise<any> {
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
@@ -28,53 +26,32 @@ async function zyteFetch(url: string): Promise<string> {
     },
     body: JSON.stringify({
       url,
-      browserHtml: true,
-      // Tell Zyte we're hitting an anti-bot protected site
-      httpResponseBody: false,
-      requestHeaders: {
-        referer: "https://turo.com/",
-      },
-      // Geo-target US
+      httpResponseBody: true,
       geolocation: "US",
+      // Tell Zyte this is an XHR / API request
+      customHttpRequestHeaders: [
+        { name: "Accept", value: "application/json" },
+        { name: "Accept-Language", value: "en-US,en;q=0.9" },
+        { name: "Referer", value: "https://turo.com/us/en/search" },
+        { name: "x-csrf-token", value: "turo" },
+      ],
     }),
   });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`Zyte ${res.status}: ${txt.slice(0, 300)}`);
+    throw new Error(`Zyte ${res.status}: ${txt.slice(0, 400)}`);
   }
-  const data = (await res.json()) as ZyteResponse;
-  if (!data.browserHtml) throw new Error("Zyte returned no browserHtml");
-  return data.browserHtml;
-}
-
-function extractNextData(html: string): any | null {
-  const m = html.match(
-    /<script[^>]+id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
-  );
-  if (!m) return null;
+  const data = await res.json();
+  if (!data.httpResponseBody) throw new Error("Zyte returned no httpResponseBody");
+  // httpResponseBody is base64-encoded
+  const decoded = atob(data.httpResponseBody);
   try {
-    return JSON.parse(m[1]);
+    return JSON.parse(decoded);
   } catch {
-    return null;
+    throw new Error(
+      `Response was not JSON (status ${data.statusCode}). First 300 chars: ${decoded.slice(0, 300)}`,
+    );
   }
-}
-
-// Walk arbitrary JSON looking for objects that look like Turo vehicle cards
-function findVehicles(node: any, out: any[] = []): any[] {
-  if (!node) return out;
-  if (Array.isArray(node)) {
-    for (const v of node) findVehicles(v, out);
-    return out;
-  }
-  if (typeof node === "object") {
-    const looksLikeVehicle =
-      typeof node.id !== "undefined" &&
-      (node.make || node.vehicleMake) &&
-      (node.model || node.vehicleModel);
-    if (looksLikeVehicle) out.push(node);
-    for (const k of Object.keys(node)) findVehicles(node[k], out);
-  }
-  return out;
 }
 
 function num(v: any): number | null {
@@ -86,17 +63,18 @@ function num(v: any): number | null {
 function mapVehicle(v: any, city: string) {
   const id = String(v.id ?? v.vehicleId ?? "");
   if (!id) return null;
-  const make = v.make ?? v.vehicleMake ?? null;
-  const model = v.model ?? v.vehicleModel ?? null;
-  const year = num(v.year ?? v.vehicleYear);
-  const trim = v.trim ?? null;
+  const make = v.make ?? v?.vehicle?.make ?? null;
+  const model = v.model ?? v?.vehicle?.model ?? null;
+  const year = num(v.year ?? v?.vehicle?.year);
+  const trim = v.trim ?? v?.vehicle?.trim ?? null;
   const price =
     num(v?.avgDailyPrice?.amount) ??
     num(v?.dailyPricing?.priceWithCurrency?.amount) ??
     num(v?.rate?.amount) ??
+    num(v?.dailyPriceWithCurrency?.amount) ??
     num(v?.dailyPrice);
   const trips = num(v?.completedTrips ?? v?.numberOfTrips ?? v?.trips);
-  const rating = num(v?.rating ?? v?.hostRating);
+  const rating = num(v?.rating ?? v?.hostRating ?? v?.host?.rating);
   const lat = num(v?.location?.latitude ?? v?.latitude);
   const lon = num(v?.location?.longitude ?? v?.longitude);
   const cityName = v?.location?.city ?? null;
@@ -104,6 +82,7 @@ function mapVehicle(v: any, city: string) {
   const image =
     v?.images?.[0]?.originalImageUrl ??
     v?.images?.[0]?.url ??
+    v?.image?.originalImageUrl ??
     v?.imageUrl ??
     null;
   const hostId = v?.host?.id ? String(v.host.id) : null;
@@ -117,10 +96,13 @@ function mapVehicle(v: any, city: string) {
     model,
     year: year ? Math.round(year) : null,
     trim,
-    vehicle_type: v?.type ?? v?.vehicleType ?? null,
-    fuel_type: v?.fuelType ?? null,
+    vehicle_type: v?.type ?? v?.vehicle?.type ?? v?.vehicleType ?? null,
+    fuel_type: v?.fuelType ?? v?.vehicle?.fuelType ?? null,
     avg_daily_price: price,
-    currency: v?.avgDailyPrice?.currency ?? "USD",
+    currency:
+      v?.avgDailyPrice?.currency ??
+      v?.dailyPricing?.priceWithCurrency?.currencyCode ??
+      "USD",
     completed_trips: trips ? Math.round(trips) : null,
     rating,
     is_all_star_host: allStar,
@@ -133,6 +115,31 @@ function mapVehicle(v: any, city: string) {
     longitude: lon,
     last_scraped_at: new Date().toISOString(),
   };
+}
+
+function buildSearchUrl(city: { name: string; latitude: number; longitude: number }) {
+  const start = new Date();
+  start.setDate(start.getDate() + 3);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 3);
+  const fmtDate = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+  // Turo's public search API
+  const params = new URLSearchParams({
+    country: "US",
+    defaultZoomLevel: "11",
+    itemsPerPage: "200",
+    locationType: "CITY",
+    region: "US",
+    sortType: "RELEVANCE",
+    location: city.name,
+    latitude: String(city.latitude),
+    longitude: String(city.longitude),
+    pickupTime: `${fmtDate(start)}T10:00`,
+    dropoffTime: `${fmtDate(end)}T10:00`,
+  });
+  return `https://turo.com/api/v2/search?${params.toString()}`;
 }
 
 async function runScrape(citySlug: string) {
@@ -152,47 +159,34 @@ async function runScrape(citySlug: string) {
       .single();
     if (cErr || !city) throw new Error(`Unknown city ${citySlug}`);
 
-    const start = new Date();
-    start.setDate(start.getDate() + 3);
-    const end = new Date(start);
-    end.setDate(end.getDate() + 3);
-    const fmt = (d: Date) =>
-      `${String(d.getMonth() + 1).padStart(2, "0")}/${String(
-        d.getDate(),
-      ).padStart(2, "0")}/${d.getFullYear()}`;
+    const url = buildSearchUrl({
+      name: city.name,
+      latitude: Number(city.latitude),
+      longitude: Number(city.longitude),
+    });
+    console.log("Zyte fetching API:", url);
 
-    const url =
-      `https://turo.com/us/en/search?` +
-      new URLSearchParams({
-        country: "US",
-        defaultZoomLevel: "11",
-        endDate: fmt(end),
-        endTime: "10:00",
-        isMapSearch: "false",
-        latitude: String(city.latitude),
-        longitude: String(city.longitude),
-        location: city.name,
-        sortType: "RELEVANCE",
-        startDate: fmt(start),
-        startTime: "10:00",
-      }).toString();
+    const json = await zyteJson(url);
 
-    console.log("Zyte fetching:", url);
-    const html = await zyteFetch(url);
-    const nextData = extractNextData(html);
-    if (!nextData) throw new Error("No __NEXT_DATA__ found in HTML");
+    // Turo returns { vehicles: [...], totalCount, ... } or { searchResults: [...] }
+    const list: any[] =
+      json?.vehicles ??
+      json?.searchResults ??
+      json?.results ??
+      [];
 
-    const raw = findVehicles(nextData);
+    console.log(
+      `API returned ${list.length} vehicles. Top-level keys: ${Object.keys(json ?? {}).join(",")}`,
+    );
+
     const seen = new Set<string>();
-    const vehicles = raw
+    const vehicles = list
       .map((v) => mapVehicle(v, citySlug))
       .filter((v): v is NonNullable<typeof v> => {
         if (!v || !v.vehicle_id || seen.has(v.vehicle_id)) return false;
         seen.add(v.vehicle_id);
         return true;
       });
-
-    console.log(`Parsed ${vehicles.length} vehicles for ${citySlug}`);
 
     if (vehicles.length) {
       const { error: upErr } = await supabase
@@ -211,7 +205,7 @@ async function runScrape(citySlug: string) {
       await supabase
         .from("scrape_runs")
         .update({
-          status: "ok",
+          status: vehicles.length ? "ok" : "empty",
           vehicles_count: vehicles.length,
           finished_at: new Date().toISOString(),
         })
