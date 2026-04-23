@@ -16,7 +16,7 @@ import {
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
 import { turoCarUrl } from "@/lib/utils";
-import { Loader2, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
+import { Loader2, ExternalLink, TrendingUp, TrendingDown, DollarSign, Car as CarIcon, Trophy, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
 } from "recharts";
