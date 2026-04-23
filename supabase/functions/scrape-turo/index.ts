@@ -87,40 +87,56 @@ function cityUrlSlug(city: { name: string; region: string | null }): string {
   return region ? `${name}-${region}` : name;
 }
 
+// Price buckets ($/day). Turo's listing pages cap at ~30-40 results;
+// splitting by price lets us pull many more vehicles per category.
+const PRICE_BUCKETS: Array<[number, number]> = [
+  [0, 50],
+  [50, 80],
+  [80, 120],
+  [120, 180],
+  [180, 280],
+  [280, 450],
+  [450, 800],
+  [800, 5000],
+];
+
 async function discoverVehicleIds(citySlugInUrl: string): Promise<
   Array<{ id: string; href: string; make: string; model: string; type: string }>
 > {
   const found = new Map<string, { id: string; href: string; make: string; model: string; type: string }>();
-  for (const cat of CATEGORY_SLUGS) {
-    const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}`;
-    let res;
-    try {
-      res = await zyteText(url);
-    } catch (e) {
-      console.warn(`landing fetch failed: ${cat}`, e);
-      continue;
-    }
-    if (res.status !== 200) continue;
+  const re = new RegExp(
+    `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
+    "g",
+  );
 
-    // Match anchors that include this city in the path
-    const re = new RegExp(
-      `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
-      "g",
-    );
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(res.body)) !== null) {
-      const [whole, type, make, model, id] = m;
-      if (!found.has(id)) {
-        found.set(id, {
-          id,
-          href: `https://turo.com${whole}`,
-          make: make.replace(/-/g, " "),
-          model: model.replace(/-/g, " "),
-          type,
-        });
+  for (const cat of CATEGORY_SLUGS) {
+    for (const [lo, hi] of PRICE_BUCKETS) {
+      const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`;
+      let res;
+      try {
+        res = await zyteText(url);
+      } catch (e) {
+        console.warn(`landing fetch failed: ${cat} $${lo}-${hi}`, e);
+        continue;
       }
+      if (res.status !== 200) continue;
+      const before = found.size;
+      let m: RegExpExecArray | null;
+      re.lastIndex = 0;
+      while ((m = re.exec(res.body)) !== null) {
+        const [whole, type, make, model, id] = m;
+        if (!found.has(id)) {
+          found.set(id, {
+            id,
+            href: `https://turo.com${whole}`,
+            make: make.replace(/-/g, " "),
+            model: model.replace(/-/g, " "),
+            type,
+          });
+        }
+      }
+      console.log(`  ${cat} $${lo}-${hi}: +${found.size - before} (total ${found.size})`);
     }
-    console.log(`  ${cat}: status=${res.status} bodyLen=${res.body.length} cumulativeIds=${found.size}`);
   }
   return [...found.values()];
 }
