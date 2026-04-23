@@ -342,7 +342,9 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const city = String(body?.city ?? "").trim();
     const all = !!body?.all || (!city);
-    const background = !!body?.background;
+    // Single-city invocations always run in the background so the HTTP
+    // response is immediate and we don't hit the 150s edge timeout.
+    const background = !!body?.background || !all;
 
     // Resolve target cities
     let targets: string[] = [];
@@ -363,31 +365,41 @@ Deno.serve(async (req) => {
       targets = [city];
     }
 
-    const runAll = async () => {
-      const results: any[] = [];
-      for (const slug of targets) {
-        try {
-          const r = await runScrape(slug);
-          results.push({ city: slug, ...r });
-        } catch (e) {
-          results.push({ city: slug, ok: false, error: e instanceof Error ? e.message : String(e) });
-        }
-      }
-      return results;
-    };
-
-    if (background) {
-      // @ts-ignore EdgeRuntime is provided by Supabase runtime
-      EdgeRuntime.waitUntil(runAll());
+    // Fan-out: when scraping multiple cities, invoke this same function
+    // once per city so each one gets its own 150s budget. Each child runs
+    // in background mode and returns immediately.
+    if (all && targets.length > 1) {
+      const url = `${SUPABASE_URL}/functions/v1/scrape-turo`;
+      await Promise.all(
+        targets.map((slug) =>
+          fetch(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${SERVICE_ROLE}`,
+              apikey: SERVICE_ROLE,
+            },
+            body: JSON.stringify({ city: slug, background: true }),
+          }).catch((e) => console.warn(`fan-out ${slug} failed:`, e)),
+        ),
+      );
       return new Response(JSON.stringify({ ok: true, queued: true, cities: targets }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const results = await runAll();
-    const ok = results.every((r) => r.ok);
-    return new Response(JSON.stringify({ ok, results }), {
-      status: ok ? 200 : 500,
+    // Single city (or single-target "all") — run inline or in background.
+    if (background) {
+      // @ts-ignore EdgeRuntime is provided by Supabase runtime
+      EdgeRuntime.waitUntil(runScrape(targets[0]));
+      return new Response(JSON.stringify({ ok: true, queued: true, city: targets[0] }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const r = await runScrape(targets[0]);
+    return new Response(JSON.stringify({ ok: r.ok, result: r }), {
+      status: r.ok ? 200 : 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {
