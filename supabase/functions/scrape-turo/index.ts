@@ -322,7 +322,19 @@ async function fetchVehicle(
   }
   const { year, model } = parseYearAndModel(ld.name, v.model);
   const make = ld.brand?.name ?? v.make ?? null;
-  const price = typeof ld.offers?.price === "number" ? ld.offers.price : null;
+  // Prefer the explicit "$NNN/day" value from the meta description / page text.
+  // Turo's JSON-LD offers.price is unreliable: it varies with the page's default
+  // trip dates and sometimes returns a multi-day total instead of the daily rate
+  // (e.g. a Lamborghini Urus showing $312/day was stored as $1,760 from offers.price).
+  let price: number | null = null;
+  const dailyMatch = res.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*\/\s*day/i);
+  if (dailyMatch) {
+    const n = parseFloat(dailyMatch[1].replace(/,/g, ""));
+    if (Number.isFinite(n) && n > 0) price = n;
+  }
+  if (price == null && typeof ld.offers?.price === "number") {
+    price = ld.offers.price;
+  }
   const currency = ld.offers?.priceCurrency ?? "USD";
   const rating = typeof ld.aggregateRating?.ratingValue === "number" ? ld.aggregateRating.ratingValue : null;
   const trips = typeof ld.aggregateRating?.ratingCount === "number" ? ld.aggregateRating.ratingCount : null;
