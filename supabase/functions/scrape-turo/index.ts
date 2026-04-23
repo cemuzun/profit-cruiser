@@ -26,18 +26,24 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 // ---------- Zyte helpers ----------
-async function zyteText(url: string): Promise<{ status: number; body: string }> {
+async function zyteText(
+  url: string,
+  opts: { browser?: boolean } = {},
+): Promise<{ status: number; body: string }> {
+  const reqBody: Record<string, unknown> = { url, geolocation: "US" };
+  if (opts.browser) {
+    // JS-rendered page (needed for Turo /search results which load via XHR).
+    reqBody.browserHtml = true;
+  } else {
+    reqBody.httpResponseBody = true;
+  }
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
       Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      url,
-      httpResponseBody: true,
-      geolocation: "US",
-    }),
+    body: JSON.stringify(reqBody),
   });
   if (!res.ok) {
     const txt = await res.text();
@@ -45,6 +51,11 @@ async function zyteText(url: string): Promise<{ status: number; body: string }> 
   }
   const data = await res.json();
   const status = data.statusCode ?? 0;
+
+  if (data.browserHtml) {
+    return { status, body: data.browserHtml as string };
+  }
+
   const raw = data.httpResponseBody as string | undefined;
   if (!raw) return { status, body: "" };
 
@@ -105,6 +116,10 @@ const PRICE_BUCKETS: Array<[number, number]> = [
 const VEHICLE_URL_RE =
   /\/us\/en\/([a-z-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8})/g;
 
+// Newer Turo detail URL: /us/en/car-details/{id}. These don't include make/model
+// in the URL — we'll get those from the JSON-LD on the detail page.
+const CAR_DETAILS_RE = /\/us\/en\/car-details\/(\d{4,8})/g;
+
 type FoundVehicle = { id: string; href: string; make: string; model: string; type: string };
 
 function harvestFromHtml(
@@ -123,6 +138,19 @@ function harvestFromHtml(
         make: make.replace(/-/g, " "),
         model: model.replace(/-/g, " "),
         type,
+      });
+    }
+  }
+  CAR_DETAILS_RE.lastIndex = 0;
+  while ((m = CAR_DETAILS_RE.exec(html)) !== null) {
+    const id = m[1];
+    if (!found.has(id)) {
+      found.set(id, {
+        id,
+        href: `https://turo.com/us/en/car-details/${id}`,
+        make: "",
+        model: "",
+        type: "car-rental",
       });
     }
   }
@@ -167,7 +195,7 @@ async function discoverVehicleIds(
   // First an unfiltered pull, then split by price buckets to exceed the cap.
   console.log(`[search] unfiltered`);
   try {
-    const res = await zyteText(buildSearchUrl(city));
+    const res = await zyteText(buildSearchUrl(city), { browser: true });
     if (res.status === 200) {
       const added = harvestFromHtml(res.body, found);
       console.log(`  search unfiltered: +${added} (total ${found.size})`);
@@ -180,7 +208,7 @@ async function discoverVehicleIds(
 
   for (const [lo, hi] of PRICE_BUCKETS) {
     try {
-      const res = await zyteText(buildSearchUrl(city, { minPrice: lo, maxPrice: hi }));
+      const res = await zyteText(buildSearchUrl(city, { minPrice: lo, maxPrice: hi }), { browser: true });
       if (res.status !== 200) continue;
       const added = harvestFromHtml(res.body, found);
       console.log(`  search $${lo}-${hi}: +${added} (total ${found.size})`);
@@ -262,10 +290,20 @@ function extractLdProduct(html: string): LdProduct | null {
 
 function parseYearAndModel(name: string | undefined, fallbackModel: string) {
   // e.g. "BMW Z4 2020 rental in Honolulu, HI by Gabriel | Turo"
+  // or  "2020 BMW Z4 rental in Honolulu, HI by Gabriel | Turo"
   if (!name) return { year: null as number | null, model: fallbackModel };
   const ym = name.match(/(\d{4})/);
   const year = ym ? parseInt(ym[1], 10) : null;
-  return { year, model: fallbackModel };
+  // Try to derive model from "{make} {model} {year} rental..." or "{year} {make} {model} rental..."
+  let model = fallbackModel;
+  if (!model) {
+    const mRental = name.match(/^(.+?)\s+rental in/i);
+    if (mRental) {
+      const tokens = mRental[1].split(/\s+/).filter((t) => !/^\d{4}$/.test(t));
+      if (tokens.length >= 2) model = tokens.slice(1).join(" "); // drop make
+    }
+  }
+  return { year, model };
 }
 
 async function fetchVehicle(
@@ -282,8 +320,8 @@ async function fetchVehicle(
     console.warn(`detail ${v.id}: no JSON-LD Product`);
     return null;
   }
-  const { year } = parseYearAndModel(ld.name, v.model);
-  const make = ld.brand?.name ?? v.make;
+  const { year, model } = parseYearAndModel(ld.name, v.model);
+  const make = ld.brand?.name ?? v.make ?? null;
   const price = typeof ld.offers?.price === "number" ? ld.offers.price : null;
   const currency = ld.offers?.priceCurrency ?? "USD";
   const rating = typeof ld.aggregateRating?.ratingValue === "number" ? ld.aggregateRating.ratingValue : null;
@@ -307,8 +345,8 @@ async function fetchVehicle(
     vehicle_id: v.id,
     city: citySlug,
     make: make ? String(make) : null,
-    model: v.model
-      ? v.model.replace(/\b\w/g, (c) => c.toUpperCase())
+    model: model
+      ? model.replace(/\b\w/g, (c) => c.toUpperCase())
       : null,
     year,
     trim: null,
