@@ -53,8 +53,11 @@ export function CitiesManager() {
     setScrapingAll(true);
     try {
       await ds.triggerScrape();
-      toast.success("Scrape complete for all active cities");
-      qc.invalidateQueries({ queryKey: ["listings-current"] });
+      toast.success("Scrape queued for all active cities — refreshing in a few minutes");
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["listings-current"] });
+        qc.invalidateQueries({ queryKey: ["scrape-runs"] });
+      }, 30_000);
       qc.invalidateQueries({ queryKey: ["scrape-runs"] });
     } catch (e: any) {
       toast.error(`Scrape failed: ${e.message}`);
