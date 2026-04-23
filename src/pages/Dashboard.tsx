@@ -386,24 +386,26 @@ export default function Dashboard() {
                           <TableCell>
                             <div className="flex items-center gap-2">
                               {l.image_url && (
-                                <a
-                                  href={turoCarUrl(l.vehicle_id)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  title="Open on Turo"
-                                >
+                                <Link to={`/car/${l.vehicle_id}`} title="View details">
                                   <img src={l.image_url} alt={`${l.year ?? ""} ${l.make ?? ""} ${l.model ?? ""}`.trim()} className="h-8 w-12 object-cover rounded hover:opacity-80 transition" loading="lazy" />
-                                </a>
+                                </Link>
                               )}
                               <div>
+                                <Link
+                                  to={`/car/${l.vehicle_id}`}
+                                  className="font-medium hover:underline"
+                                  title="View details"
+                                >
+                                  {l.year} {l.make} {l.model}
+                                </Link>
                                 <a
                                   href={turoCarUrl(l.vehicle_id)}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="font-medium hover:underline"
+                                  className="ml-2 text-xs text-muted-foreground hover:underline"
                                   title="Open on Turo"
                                 >
-                                  {l.year} {l.make} {l.model}
+                                  ↗
                                 </a>
                                 <div className="text-xs text-muted-foreground">{l.vehicle_type ?? "—"} · {l.fuel_type ?? "—"}</div>
                               </div>
