@@ -290,10 +290,20 @@ function extractLdProduct(html: string): LdProduct | null {
 
 function parseYearAndModel(name: string | undefined, fallbackModel: string) {
   // e.g. "BMW Z4 2020 rental in Honolulu, HI by Gabriel | Turo"
+  // or  "2020 BMW Z4 rental in Honolulu, HI by Gabriel | Turo"
   if (!name) return { year: null as number | null, model: fallbackModel };
   const ym = name.match(/(\d{4})/);
   const year = ym ? parseInt(ym[1], 10) : null;
-  return { year, model: fallbackModel };
+  // Try to derive model from "{make} {model} {year} rental..." or "{year} {make} {model} rental..."
+  let model = fallbackModel;
+  if (!model) {
+    const mRental = name.match(/^(.+?)\s+rental in/i);
+    if (mRental) {
+      const tokens = mRental[1].split(/\s+/).filter((t) => !/^\d{4}$/.test(t));
+      if (tokens.length >= 2) model = tokens.slice(1).join(" "); // drop make
+    }
+  }
+  return { year, model };
 }
 
 async function fetchVehicle(
@@ -310,8 +320,8 @@ async function fetchVehicle(
     console.warn(`detail ${v.id}: no JSON-LD Product`);
     return null;
   }
-  const { year } = parseYearAndModel(ld.name, v.model);
-  const make = ld.brand?.name ?? v.make;
+  const { year, model } = parseYearAndModel(ld.name, v.model);
+  const make = ld.brand?.name ?? v.make ?? null;
   const price = typeof ld.offers?.price === "number" ? ld.offers.price : null;
   const currency = ld.offers?.priceCurrency ?? "USD";
   const rating = typeof ld.aggregateRating?.ratingValue === "number" ? ld.aggregateRating.ratingValue : null;
@@ -335,8 +345,8 @@ async function fetchVehicle(
     vehicle_id: v.id,
     city: citySlug,
     make: make ? String(make) : null,
-    model: v.model
-      ? v.model.replace(/\b\w/g, (c) => c.toUpperCase())
+    model: model
+      ? model.replace(/\b\w/g, (c) => c.toUpperCase())
       : null,
     year,
     trim: null,
