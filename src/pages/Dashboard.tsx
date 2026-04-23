@@ -88,27 +88,45 @@ export default function Dashboard() {
 
   const enriched = useMemo(() => {
     if (!cityListings.length || !globalCosts) return [];
+    const minP = Number(minPrice) || 0;
+    const maxP = Number(maxPrice) || Infinity;
+    const cityQ = cityFilter.trim().toLowerCase();
     const filtered = cityListings.filter((l) => {
       if (search) {
         const q = search.toLowerCase();
         const blob = `${l.make ?? ""} ${l.model ?? ""} ${l.year ?? ""}`.toLowerCase();
         if (!blob.includes(q)) return false;
       }
+      if (cityQ && !(l.city ?? "").toLowerCase().includes(cityQ)) return false;
       if (fuelType !== "all" && (l.fuel_type ?? "").toUpperCase() !== fuelType) return false;
+      const p = Number(l.avg_daily_price) || 0;
+      if (p < minP || p > maxP) return false;
       return true;
     });
     const withProfit = filtered.map((l) => ({
       ...l,
       profit: computeProfit(l as any, globalCosts),
     }));
-    withProfit.sort((a, b) => {
-      if (sortBy === "profit") return b.profit.monthlyProfit - a.profit.monthlyProfit;
-      if (sortBy === "price") return (b.avg_daily_price ?? 0) - (a.avg_daily_price ?? 0);
-      if (sortBy === "trips") return (b.completed_trips ?? 0) - (a.completed_trips ?? 0);
-      return (b.rating ?? 0) - (a.rating ?? 0);
-    });
+    const dir = sortDir === "asc" ? 1 : -1;
+    const cmp = (a: any, b: any): number => {
+      switch (sortKey) {
+        case "vehicle": return (`${a.year ?? ""} ${a.make ?? ""} ${a.model ?? ""}`)
+          .localeCompare(`${b.year ?? ""} ${b.make ?? ""} ${b.model ?? ""}`) * dir;
+        case "city": return (a.city ?? "").localeCompare(b.city ?? "") * dir;
+        case "price": return ((a.avg_daily_price ?? 0) - (b.avg_daily_price ?? 0)) * dir;
+        case "p7": return ((a.price_7d_avg ?? 0) - (b.price_7d_avg ?? 0)) * dir;
+        case "p14": return ((a.price_14d_avg ?? 0) - (b.price_14d_avg ?? 0)) * dir;
+        case "p30": return ((a.price_30d_avg ?? 0) - (b.price_30d_avg ?? 0)) * dir;
+        case "trips": return ((a.completed_trips ?? 0) - (b.completed_trips ?? 0)) * dir;
+        case "rating": return ((a.rating ?? 0) - (b.rating ?? 0)) * dir;
+        case "margin": return (a.profit.marginPct - b.profit.marginPct) * dir;
+        case "profit":
+        default: return (a.profit.monthlyProfit - b.profit.monthlyProfit) * dir;
+      }
+    };
+    withProfit.sort(cmp);
     return withProfit;
-  }, [cityListings, globalCosts, search, fuelType, sortBy]);
+  }, [cityListings, globalCosts, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
