@@ -309,12 +309,13 @@ export default function Dashboard() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="max-w-xs"
               />
-              <Input
-                placeholder="Filter city…"
-                value={cityFilter}
-                onChange={(e) => setCityFilter(e.target.value)}
-                className="w-[140px]"
-              />
+              <Select value={cityFilter} onValueChange={setCityFilter}>
+                <SelectTrigger className="w-[160px]"><SelectValue placeholder="Filter city…" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">All cities</SelectItem>
+                  {(cityList ?? []).map((c) => <SelectItem key={c.slug} value={c.slug}>{c.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
               <Input
                 placeholder="Min $"
                 value={minPrice}
