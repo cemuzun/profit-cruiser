@@ -195,7 +195,7 @@ async function discoverVehicleIds(
   // First an unfiltered pull, then split by price buckets to exceed the cap.
   console.log(`[search] unfiltered`);
   try {
-    const res = await zyteText(buildSearchUrl(city));
+    const res = await zyteText(buildSearchUrl(city), { browser: true });
     if (res.status === 200) {
       const added = harvestFromHtml(res.body, found);
       console.log(`  search unfiltered: +${added} (total ${found.size})`);
