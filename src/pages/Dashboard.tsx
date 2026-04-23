@@ -263,6 +263,21 @@ export default function Dashboard() {
           </Card>
         </div>
 
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <MoversCard
+            title="Biggest price drops (last 24h)"
+            tone="down"
+            items={priceMovers?.fallers ?? []}
+            emptyLabel="No notable price drops yet — waiting for next scrape."
+          />
+          <MoversCard
+            title="Biggest price spikes (last 24h)"
+            tone="up"
+            items={priceMovers?.risers ?? []}
+            emptyLabel="No notable price spikes yet — waiting for next scrape."
+          />
+        </div>
+
         <Card>
           <CardContent className="pt-4 space-y-3">
             <div className="flex flex-wrap items-center gap-2">
