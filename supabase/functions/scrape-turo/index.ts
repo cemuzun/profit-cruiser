@@ -280,7 +280,10 @@ async function runScrape(citySlug: string) {
         .upsert(vehicles, { onConflict: "vehicle_id" });
       if (upErr) throw upErr;
 
-      const snaps = vehicles.map((v) => ({ ...v, scraped_at: startedAt }));
+      const snaps = vehicles.map((v) => {
+        const { last_scraped_at, ...rest } = v;
+        return { ...rest, scraped_at: startedAt };
+      });
       const { error: snapErr } = await supabase
         .from("listings_snapshots")
         .insert(snaps);
