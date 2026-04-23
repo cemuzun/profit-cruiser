@@ -1,53 +1,34 @@
 
 
-## Pivot: Stop fighting Docker, run discovery directly on the VPS host
+## Reset: delete all scraping code, start clean
 
-The current loop is stuck because `discover-xhr.mjs` keeps not landing inside the container image (Docker build cache, wrong host path, or file never `scp`'d). We've burned many turns on this. Let's bypass Docker entirely for the discovery step, and at the same time prepare two parallel fallback strategies so we're not blocked on any single approach.
+You're right — let's wipe the slate. Here's exactly what gets removed and what remains.
 
-## Three parallel tracks
+### Delete
 
-### Track A — Run discovery on the VPS host (no Docker)
-Discovery is a one-shot diagnostic, not a recurring job. It does not need to live in the container.
+**Edge functions** (removed from codebase + undeployed from Lovable Cloud):
+- `supabase/functions/scrape-turo/`
+- `supabase/functions/turo-pricing/`
+- `supabase/functions/cargurus-price/`
 
-1. Install Node + Playwright directly on the VPS in a temp dir.
-2. Write `discover-xhr.mjs` directly on the VPS via heredoc (no `scp`, no Docker copy, no build cache).
-3. Run it against Turo through the ScraperAPI proxy already configured.
-4. Capture the artifact JSON to `/opt/turo-scraper/artifacts-host/`.
+**VPS scraper folder** (entire directory):
+- `vps-scraper/` — Dockerfile, scraper.mjs, queue-worker.mjs, discover-xhr.mjs, schema.sql, Caddyfile, all debug/test scripts, README
 
-This eliminates every failure mode we've hit (missing file in image, build cache, copy path errors).
+**Stale plan file**:
+- `.lovable/plan.md` (the Track A/B/C VPS pivot doc)
 
-### Track B — Capture real Turo traffic from a regular browser (most reliable)
-If Playwright on the VPS also gets challenged, we capture the API shape from a real human session:
+### Keep
 
-1. User opens Turo search in Chrome on their own laptop.
-2. DevTools → Network → filter `api` → right-click → "Save all as HAR".
-3. Upload the HAR file; we parse it to extract: endpoint URL, method, headers (especially `x-csrf-token`, cookies, `apikey`-style headers), and request/response shape.
-4. Rewrite `scraper.mjs` to replay that exact request through ScraperAPI.
+- All database tables (`listings_current`, `listings_snapshots`, `price_forecasts`, `scrape_runs`, `watchlist`, `cities`, cost tables) — schema stays so we can repopulate later
+- All frontend pages (`Dashboard`, `Analyzer`, `Compare`, `CarDetail`, `Watchlist`, `Seasonality`, `Settings`) — they read from the DB and keep working with whatever data is there
+- `src/lib/dataSource.ts`, `profitability.ts`, `seasonality.ts` and the hooks — these are pure read/calc logic, not scrapers
+- Secrets in Lovable Cloud (`ZYTE_API_KEY`, `APIFY_API_TOKEN`, `TURO_PROXY_URL`, `GEONIX_PROXY_URL`, `FIRECRAWL_API_KEY`) — left in place; you can prune later from Connectors if you want
 
-This is how production-grade scrapers are typically built and it sidesteps Cloudflare entirely for the discovery phase.
+### Frontend cleanup
 
-### Track C — Switch scraping strategy if Turo's API is locked behind session tokens
-If the captured request requires short-lived session tokens (CSRF, signed cookies), shift the scraper from "headless API call" to one of:
+Any "Scrape now" button or call to `supabase.functions.invoke('scrape-turo' | 'turo-pricing' | 'cargurus-price')` will be removed or stubbed so the UI doesn't 404. I'll grep for invocations and clean them up in the same pass.
 
-- **ScraperAPI with `render=true` + `premium=true`** — lets ScraperAPI handle Cloudflare and return rendered HTML; we parse the embedded `__NEXT_DATA__` / SSR JSON instead of calling the API.
-- **Public sitemap + vehicle detail pages** — Turo exposes vehicle pages at stable URLs; scrape listings via `/sitemap.xml` then fetch each vehicle page (lower volume, lower block rate).
-- **Third-party data source** — e.g. RVshare-style aggregators or unofficial Turo data APIs on RapidAPI as a stopgap.
+### After this
 
-## Execution order (once you approve)
-
-1. **Track A first (10 min):** install Node on host, run discovery, see what comes back.
-2. **If Track A is blocked by Cloudflare:** ask you to capture a HAR from your browser (Track B).
-3. **Based on the HAR contents, pick Track C variant** and rewrite `scraper.mjs` accordingly.
-4. **Re-bake the working scraper into Docker** as the final step (only after we know what works).
-
-## Technical details
-
-- VPS host commands will use `apt install -y nodejs npm && npm i -g playwright && npx playwright install --with-deps chromium`, then a self-contained `discover-xhr.mjs` written via heredoc to `/opt/turo-scraper/discover-xhr.mjs` and run with `node discover-xhr.mjs --auto-headless --proxy "$SCRAPER_PROXY"`.
-- Output written to `/opt/turo-scraper/artifacts-host/turo-xhr-*.json`; you'll `cat` and paste it.
-- HAR parsing (Track B) will be done with a small Node script that filters entries where `request.url` matches `turo.com/api/` and emits a curl-equivalent + a Playwright `request.post` snippet.
-- Final scraper rewrite will live in `vps-scraper/scraper.mjs`; Dockerfile already has `COPY *.mjs ./` so subsequent rebuilds will pick it up.
-
-## What I need from you
-
-Reply with which track to start with — my recommendation is **Track A now, Track B in parallel** (you can start capturing the HAR while I prep the host install script). If Track A succeeds we may not need B at all.
+You'll have a clean app with empty/stale data tables, zero scraping code, and zero deployed scraping functions. From there we design the new ingestion approach from scratch — no assumptions carried over.
 
