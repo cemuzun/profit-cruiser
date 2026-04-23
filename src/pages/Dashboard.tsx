@@ -400,7 +400,7 @@ export default function Dashboard() {
                                   {l.year} {l.make} {l.model}
                                 </Link>
                                 <a
-                                  href={turoCarUrl(l.vehicle_id, (l as any).listing_url)}
+                                  href={turoCarUrl(l.vehicle_id, (l as any).listing_url, { city: l.location_city ?? l.city, make: l.make, model: l.model, vehicle_type: l.vehicle_type })}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="ml-2 text-xs text-muted-foreground hover:underline"
