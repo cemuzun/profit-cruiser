@@ -163,47 +163,6 @@ export function CitiesManager() {
           </div>
         )}
 
-        <div className="pt-2">
-          <h3 className="text-sm font-semibold mb-2">Recent runs</h3>
-          {!runs?.length ? (
-            <p className="text-xs text-muted-foreground py-2">No runs yet.</p>
-          ) : (
-            <div className="overflow-x-auto rounded-md border border-border">
-              <table className="w-full text-xs">
-                <thead className="bg-muted/50">
-                  <tr className="text-left">
-                    <th className="px-2 py-1.5 font-medium">City</th>
-                    <th className="px-2 py-1.5 font-medium">Status</th>
-                    <th className="px-2 py-1.5 font-medium text-right">Vehicles</th>
-                    <th className="px-2 py-1.5 font-medium">Started</th>
-                    <th className="px-2 py-1.5 font-medium">Finished</th>
-                    <th className="px-2 py-1.5 font-medium">Duration</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.slice(0, 20).map((r) => {
-                    const started = new Date(r.started_at);
-                    const finished = r.finished_at ? new Date(r.finished_at) : null;
-                    const durSec = finished ? Math.round((finished.getTime() - started.getTime()) / 1000) : null;
-                    const dur = durSec == null ? "—" : durSec >= 60 ? `${Math.floor(durSec / 60)}m ${durSec % 60}s` : `${durSec}s`;
-                    const variant: "default" | "secondary" | "destructive" =
-                      r.status === "success" ? "default" : r.status === "error" || r.status === "failed" ? "destructive" : "secondary";
-                    return (
-                      <tr key={r.id} className="border-t border-border">
-                        <td className="px-2 py-1.5 font-mono">{r.city}</td>
-                        <td className="px-2 py-1.5"><Badge variant={variant} className="text-[10px]">{r.status}</Badge></td>
-                        <td className="px-2 py-1.5 text-right">{r.vehicles_count ?? "—"}</td>
-                        <td className="px-2 py-1.5 text-muted-foreground">{started.toLocaleString()}</td>
-                        <td className="px-2 py-1.5 text-muted-foreground">{finished ? finished.toLocaleString() : "—"}</td>
-                        <td className="px-2 py-1.5 text-muted-foreground">{dur}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
       </CardContent>
     </Card>
   );

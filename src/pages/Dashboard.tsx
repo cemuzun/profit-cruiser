@@ -16,18 +16,30 @@ import {
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
 import { turoCarUrl } from "@/lib/utils";
-import { Loader2, ExternalLink, TrendingUp, DollarSign, Car as CarIcon, Trophy } from "lucide-react";
+import { Loader2, ExternalLink, TrendingUp, TrendingDown, DollarSign, Car as CarIcon, Trophy, ArrowUp, ArrowDown, ArrowUpDown } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
 } from "recharts";
 import { format } from "date-fns";
 import { CitiesManager } from "@/components/CitiesManager";
 
+type SortKey = "vehicle" | "city" | "price" | "p7" | "p14" | "p30" | "trips" | "rating" | "profit" | "margin";
+type SortDir = "asc" | "desc";
+
 export default function Dashboard() {
   const [city, setCity] = useState("all");
   const [search, setSearch] = useState("");
   const [fuelType, setFuelType] = useState("all");
-  const [sortBy, setSortBy] = useState<"profit" | "price" | "trips" | "rating">("profit");
+  const [cityFilter, setCityFilter] = useState("");
+  const [minPrice, setMinPrice] = useState("");
+  const [maxPrice, setMaxPrice] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("profit");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const toggleSort = (k: SortKey) => {
+    if (sortKey === k) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else { setSortKey(k); setSortDir(k === "vehicle" || k === "city" ? "asc" : "desc"); }
+  };
 
   const { data: globalCosts } = useGlobalCosts();
 
@@ -76,35 +88,86 @@ export default function Dashboard() {
 
   const enriched = useMemo(() => {
     if (!cityListings.length || !globalCosts) return [];
+    const minP = Number(minPrice) || 0;
+    const maxP = Number(maxPrice) || Infinity;
+    const cityQ = cityFilter.trim().toLowerCase();
     const filtered = cityListings.filter((l) => {
       if (search) {
         const q = search.toLowerCase();
         const blob = `${l.make ?? ""} ${l.model ?? ""} ${l.year ?? ""}`.toLowerCase();
         if (!blob.includes(q)) return false;
       }
+      if (cityQ && !(l.city ?? "").toLowerCase().includes(cityQ)) return false;
       if (fuelType !== "all" && (l.fuel_type ?? "").toUpperCase() !== fuelType) return false;
+      const p = Number(l.avg_daily_price) || 0;
+      if (p < minP || p > maxP) return false;
       return true;
     });
     const withProfit = filtered.map((l) => ({
       ...l,
       profit: computeProfit(l as any, globalCosts),
     }));
-    withProfit.sort((a, b) => {
-      if (sortBy === "profit") return b.profit.monthlyProfit - a.profit.monthlyProfit;
-      if (sortBy === "price") return (b.avg_daily_price ?? 0) - (a.avg_daily_price ?? 0);
-      if (sortBy === "trips") return (b.completed_trips ?? 0) - (a.completed_trips ?? 0);
-      return (b.rating ?? 0) - (a.rating ?? 0);
-    });
+    const dir = sortDir === "asc" ? 1 : -1;
+    const cmp = (a: any, b: any): number => {
+      switch (sortKey) {
+        case "vehicle": return (`${a.year ?? ""} ${a.make ?? ""} ${a.model ?? ""}`)
+          .localeCompare(`${b.year ?? ""} ${b.make ?? ""} ${b.model ?? ""}`) * dir;
+        case "city": return (a.city ?? "").localeCompare(b.city ?? "") * dir;
+        case "price": return ((a.avg_daily_price ?? 0) - (b.avg_daily_price ?? 0)) * dir;
+        case "p7": return ((a.price_7d_avg ?? 0) - (b.price_7d_avg ?? 0)) * dir;
+        case "p14": return ((a.price_14d_avg ?? 0) - (b.price_14d_avg ?? 0)) * dir;
+        case "p30": return ((a.price_30d_avg ?? 0) - (b.price_30d_avg ?? 0)) * dir;
+        case "trips": return ((a.completed_trips ?? 0) - (b.completed_trips ?? 0)) * dir;
+        case "rating": return ((a.rating ?? 0) - (b.rating ?? 0)) * dir;
+        case "margin": return (a.profit.marginPct - b.profit.marginPct) * dir;
+        case "profit":
+        default: return (a.profit.monthlyProfit - b.profit.monthlyProfit) * dir;
+      }
+    };
+    withProfit.sort(cmp);
     return withProfit;
-  }, [cityListings, globalCosts, search, fuelType, sortBy]);
+  }, [cityListings, globalCosts, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
     const avgPrice = enriched.reduce((a, l) => a + (l.avg_daily_price ?? 0), 0) / enriched.length;
     const avgProfit = enriched.reduce((a, l) => a + l.profit.monthlyProfit, 0) / enriched.length;
-    const top = enriched[0];
+    const top = [...enriched].sort((a, b) => b.profit.monthlyProfit - a.profit.monthlyProfit)[0];
     return { count: enriched.length, avgPrice, avgProfit, top };
   }, [enriched]);
+
+  // Price movers — compare current price vs latest snapshot ≥ 18h ago.
+  const { data: priceMovers } = useQuery({
+    queryKey: ["price-movers", city],
+    enabled: !!listings,
+    queryFn: async () => {
+      const snaps = await ds.snapshots();
+      const cutoff = Date.now() - 18 * 60 * 60 * 1000;
+      const prevByVehicle = new Map<string, { price: number; at: string }>();
+      for (const s of snaps) {
+        const t = new Date(s.scraped_at).getTime();
+        if (t > cutoff) continue;
+        if (s.avg_daily_price == null) continue;
+        const cur = prevByVehicle.get(s.vehicle_id);
+        if (!cur || new Date(cur.at).getTime() < t) {
+          prevByVehicle.set(s.vehicle_id, { price: Number(s.avg_daily_price), at: s.scraped_at });
+        }
+      }
+      const rows = (listings ?? [])
+        .filter((l) => city === "all" || l.city === city)
+        .map((l) => {
+          const prev = prevByVehicle.get(l.vehicle_id);
+          if (!prev || !l.avg_daily_price || prev.price <= 0) return null;
+          const now = Number(l.avg_daily_price);
+          const deltaPct = ((now - prev.price) / prev.price) * 100;
+          return { listing: l, prev: prev.price, now, deltaPct, prevAt: prev.at };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null && Math.abs(x.deltaPct) >= 5);
+      const risers = [...rows].sort((a, b) => b.deltaPct - a.deltaPct).slice(0, 6);
+      const fallers = [...rows].sort((a, b) => a.deltaPct - b.deltaPct).slice(0, 6);
+      return { risers, fallers };
+    },
+  });
 
   const profitByMake = useMemo(() => {
     if (!enriched.length) return [];
@@ -200,6 +263,21 @@ export default function Dashboard() {
           </Card>
         </div>
 
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <MoversCard
+            title="Biggest price drops (last 24h)"
+            tone="down"
+            items={priceMovers?.fallers ?? []}
+            emptyLabel="No notable price drops yet — waiting for next scrape."
+          />
+          <MoversCard
+            title="Biggest price spikes (last 24h)"
+            tone="up"
+            items={priceMovers?.risers ?? []}
+            emptyLabel="No notable price spikes yet — waiting for next scrape."
+          />
+        </div>
+
         <Card>
           <CardContent className="pt-4 space-y-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -208,6 +286,26 @@ export default function Dashboard() {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="max-w-xs"
+              />
+              <Input
+                placeholder="Filter city…"
+                value={cityFilter}
+                onChange={(e) => setCityFilter(e.target.value)}
+                className="w-[140px]"
+              />
+              <Input
+                placeholder="Min $"
+                value={minPrice}
+                onChange={(e) => setMinPrice(e.target.value.replace(/[^\d.]/g, ""))}
+                className="w-[90px]"
+                inputMode="decimal"
+              />
+              <Input
+                placeholder="Max $"
+                value={maxPrice}
+                onChange={(e) => setMaxPrice(e.target.value.replace(/[^\d.]/g, ""))}
+                className="w-[90px]"
+                inputMode="decimal"
               />
               <Select value={fuelType} onValueChange={setFuelType}>
                 <SelectTrigger className="w-[140px]"><SelectValue placeholder="Fuel" /></SelectTrigger>
@@ -219,15 +317,15 @@ export default function Dashboard() {
                   <SelectItem value="DIESEL">Diesel</SelectItem>
                 </SelectContent>
               </Select>
-              <Select value={sortBy} onValueChange={(v: any) => setSortBy(v)}>
-                <SelectTrigger className="w-[180px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="profit">Sort: Monthly profit</SelectItem>
-                  <SelectItem value="price">Sort: Daily price</SelectItem>
-                  <SelectItem value="trips">Sort: Trips completed</SelectItem>
-                  <SelectItem value="rating">Sort: Rating</SelectItem>
-                </SelectContent>
-              </Select>
+              {(search || cityFilter || minPrice || maxPrice || fuelType !== "all") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { setSearch(""); setCityFilter(""); setMinPrice(""); setMaxPrice(""); setFuelType("all"); }}
+                >
+                  Clear
+                </Button>
+              )}
               <div className="ml-auto text-xs text-muted-foreground">
                 {enriched.length} cars
               </div>
@@ -244,16 +342,16 @@ export default function Dashboard() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Vehicle</TableHead>
-                      <TableHead>City</TableHead>
-                      <TableHead className="text-right">Now $/day</TableHead>
-                      <TableHead className="text-right">7d avg</TableHead>
-                      <TableHead className="text-right">14d avg</TableHead>
-                      <TableHead className="text-right">30d avg</TableHead>
-                      <TableHead className="text-right">Trips</TableHead>
-                      <TableHead className="text-right">Rating</TableHead>
-                      <TableHead className="text-right">Monthly profit</TableHead>
-                      <TableHead className="text-right">Margin</TableHead>
+                      <SortableHead k="vehicle" label="Vehicle" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="city" label="City" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="price" label="Now $/day" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="p7" label="7d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="p14" label="14d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="p30" label="30d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="trips" label="Trips" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="rating" label="Rating" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="profit" label="Monthly profit" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <SortableHead k="margin" label="Margin" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <TableHead>Verdict</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
@@ -342,4 +440,73 @@ export function VerdictBadge({ tone, label }: { tone: string; label: string }) {
 
 function EmptyChart({ label }: { label: string }) {
   return <div className="h-full flex items-center justify-center text-sm text-muted-foreground">{label}</div>;
+}
+
+type MoverItem = { listing: Listing; prev: number; now: number; deltaPct: number; prevAt: string };
+
+function MoversCard({
+  title, items, tone, emptyLabel,
+}: { title: string; items: MoverItem[]; tone: "up" | "down"; emptyLabel: string }) {
+  const Icon = tone === "up" ? TrendingUp : TrendingDown;
+  const color = tone === "up" ? "text-success" : "text-danger";
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="text-sm font-medium mb-2 flex items-center gap-2">
+          <Icon className={`h-4 w-4 ${color}`} />
+          {title}
+        </div>
+        {items.length === 0 ? (
+          <div className="py-8 text-center text-xs text-muted-foreground">{emptyLabel}</div>
+        ) : (
+          <div className="space-y-1.5">
+            {items.map((m) => (
+              <Link
+                key={m.listing.vehicle_id}
+                to={`/car/${m.listing.vehicle_id}`}
+                className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 transition-colors"
+              >
+                {m.listing.image_url && (
+                  <img src={m.listing.image_url} alt="" className="h-7 w-10 object-cover rounded" loading="lazy" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium truncate">
+                    {m.listing.year} {m.listing.make} {m.listing.model}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate">
+                    {m.listing.city} · {fmtUSD(m.prev)} → {fmtUSD(m.now)}
+                  </div>
+                </div>
+                <div className={`text-sm font-semibold tabular-nums ${color}`}>
+                  {m.deltaPct > 0 ? "+" : ""}{m.deltaPct.toFixed(1)}%
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SortableHead({
+  k, label, align = "left", sortKey, sortDir, onClick,
+}: {
+  k: SortKey; label: string; align?: "left" | "right";
+  sortKey: SortKey; sortDir: SortDir; onClick: (k: SortKey) => void;
+}) {
+  const active = sortKey === k;
+  const Icon = active ? (sortDir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  return (
+    <TableHead className={align === "right" ? "text-right" : ""}>
+      <button
+        type="button"
+        onClick={() => onClick(k)}
+        className={`inline-flex items-center gap-1 hover:text-foreground transition-colors ${active ? "text-foreground font-semibold" : ""} ${align === "right" ? "flex-row-reverse" : ""}`}
+      >
+        {label}
+        <Icon className="h-3 w-3 opacity-60" />
+      </button>
+    </TableHead>
+  );
 }

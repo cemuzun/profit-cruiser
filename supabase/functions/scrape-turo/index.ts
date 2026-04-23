@@ -324,25 +324,53 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const city = String(body?.city ?? "").trim();
-    if (!city) {
-      return new Response(JSON.stringify({ error: "city is required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    const all = !!body?.all || (!city);
     const background = !!body?.background;
+
+    // Resolve target cities
+    let targets: string[] = [];
+    if (all) {
+      const { data, error } = await supabase
+        .from("cities")
+        .select("slug")
+        .eq("active", true);
+      if (error) throw error;
+      targets = (data ?? []).map((r: any) => r.slug);
+      if (!targets.length) {
+        return new Response(JSON.stringify({ error: "no active cities" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    } else {
+      targets = [city];
+    }
+
+    const runAll = async () => {
+      const results: any[] = [];
+      for (const slug of targets) {
+        try {
+          const r = await runScrape(slug);
+          results.push({ city: slug, ...r });
+        } catch (e) {
+          results.push({ city: slug, ok: false, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      return results;
+    };
 
     if (background) {
       // @ts-ignore EdgeRuntime is provided by Supabase runtime
-      EdgeRuntime.waitUntil(runScrape(city));
-      return new Response(JSON.stringify({ ok: true, queued: true, city }), {
+      EdgeRuntime.waitUntil(runAll());
+      return new Response(JSON.stringify({ ok: true, queued: true, cities: targets }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const result = await runScrape(city);
-    return new Response(JSON.stringify(result), {
-      status: result.ok ? 200 : 500,
+    const results = await runAll();
+    const ok = results.every((r) => r.ok);
+    return new Response(JSON.stringify({ ok, results }), {
+      status: ok ? 200 : 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (e) {

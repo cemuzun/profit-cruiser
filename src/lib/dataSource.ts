@@ -181,10 +181,10 @@ export const ds = {
     if (error) throw error;
   },
   async triggerScrape(citySlug?: string) {
-    if (!citySlug) throw new Error("city is required");
-    const { data, error } = await supabase.functions.invoke("scrape-turo", {
-      body: { city: citySlug, background: true },
-    });
+    const body = citySlug
+      ? { city: citySlug, background: true }
+      : { all: true, background: true };
+    const { data, error } = await supabase.functions.invoke("scrape-turo", { body });
     if (error) throw error;
     return data;
   },
