@@ -130,26 +130,9 @@ export default function CarDetail() {
 
   const fetchCarGurus = useMutation({
     mutationFn: async () => {
-      if (!car?.make || !car?.model) throw new Error("Vehicle missing make/model");
-      const { data, error } = await supabase.functions.invoke("cargurus-price", {
-        body: { year: car.year, make: car.make, model: car.model, trim: car.trim },
-      });
-      if (error) throw new Error(error.message);
-      if (!data || data.error) throw new Error(data?.error ?? "No price returned");
-      return data as { avg_price: number | null; min_price: number | null; max_price: number | null; sample_size: number | null; source_url: string };
+      throw new Error("Price lookup is not configured yet.");
     },
-    onSuccess: (data) => {
-      const price = data.avg_price ?? data.min_price ?? data.max_price;
-      if (price == null) {
-        toast.error("CarGurus returned no usable price");
-        return;
-      }
-      setForm((f) => ({ ...f, purchase_price: Math.round(Number(price)) }));
-      toast.success(
-        `Filled $${Math.round(Number(price)).toLocaleString()} from CarGurus${data.sample_size ? ` (${data.sample_size} listings)` : ""}`,
-      );
-    },
-    onError: (e: Error) => toast.error(e.message ?? "CarGurus fetch failed"),
+    onError: (e: Error) => toast.error(e.message ?? "Price lookup failed"),
   });
 
   const forecastChartData = useMemo(() => {

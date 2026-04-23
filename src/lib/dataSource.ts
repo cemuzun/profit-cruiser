@@ -180,33 +180,8 @@ export const ds = {
       .eq("slug", slug);
     if (error) throw error;
   },
-  async triggerScrape(citySlug?: string) {
-    const { data, error } = await supabase.functions.invoke("scrape-turo", {
-      body: citySlug ? { city: citySlug } : { all: true },
-    });
-    if (error) throw new Error(error.message || "Scrape function failed");
-    if (data && data.ok === false) {
-      const detail = data?.diagnostics?.reason === "turo_blocked"
-        ? " Turo is blocking the current proxy IPs."
-        : data?.diagnostics?.reason === "proxy_auth_failed"
-          ? " Check proxy host, port, username, and password."
-          : data?.diagnostics?.reason === "proxy_tunnel_failed"
-            ? " The proxy tunnel could not be established."
-            : "";
-      throw new Error(`${data.error || "Scrape failed"}${detail}`);
-    }
-    // Surface partial failures (some cities errored)
-    if (data?.results) {
-      const failed = Object.entries(data.results).filter(
-        ([, r]: any) => r?.error,
-      );
-      if (failed.length > 0) {
-        const names = failed.map(([slug]) => slug).join(", ");
-        const firstMsg = (failed[0][1] as any).error;
-        throw new Error(`Failed for ${names}: ${firstMsg}`);
-      }
-    }
-    return data;
+  async triggerScrape(_citySlug?: string) {
+    throw new Error("Scraping is not configured. Data ingestion will be set up separately.");
   },
 };
 

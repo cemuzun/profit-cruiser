@@ -44,19 +44,7 @@ export default function Watchlist() {
 
   const refreshPricing = useMutation({
     mutationFn: async () => {
-      const ids = userStore.getWatchlist().map((w) => w.vehicle_id);
-      if (!ids.length) throw new Error("Watchlist is empty");
-      const { data, error } = await supabase.functions.invoke("turo-pricing", {
-        body: { vehicleIds: ids },
-      });
-      if (error) throw error;
-      return data;
-    },
-    onSuccess: (data: any) => {
-      const ok = data?.results?.filter((r: any) => r.ok).length ?? 0;
-      const fail = data?.results?.filter((r: any) => !r.ok).length ?? 0;
-      toast.success(`Refreshed pricing: ${ok} ok, ${fail} failed`);
-      qc.invalidateQueries({ queryKey: ["watchlist-full"] });
+      throw new Error("Pricing refresh is not configured yet.");
     },
     onError: (e: any) => toast.error(`Refresh failed: ${e.message ?? e}`),
   });
