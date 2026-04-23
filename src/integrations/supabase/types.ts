@@ -201,6 +201,7 @@ export type Database = {
           is_all_star_host: boolean | null
           last_scraped_at: string
           latitude: number | null
+          listing_url: string | null
           location_city: string | null
           location_state: string | null
           longitude: number | null
@@ -228,6 +229,7 @@ export type Database = {
           is_all_star_host?: boolean | null
           last_scraped_at?: string
           latitude?: number | null
+          listing_url?: string | null
           location_city?: string | null
           location_state?: string | null
           longitude?: number | null
@@ -255,6 +257,7 @@ export type Database = {
           is_all_star_host?: boolean | null
           last_scraped_at?: string
           latitude?: number | null
+          listing_url?: string | null
           location_city?: string | null
           location_state?: string | null
           longitude?: number | null
@@ -286,6 +289,7 @@ export type Database = {
           image_url: string | null
           is_all_star_host: boolean | null
           latitude: number | null
+          listing_url: string | null
           location_city: string | null
           location_state: string | null
           longitude: number | null
@@ -315,6 +319,7 @@ export type Database = {
           image_url?: string | null
           is_all_star_host?: boolean | null
           latitude?: number | null
+          listing_url?: string | null
           location_city?: string | null
           location_state?: string | null
           longitude?: number | null
@@ -344,6 +349,7 @@ export type Database = {
           image_url?: string | null
           is_all_star_host?: boolean | null
           latitude?: number | null
+          listing_url?: string | null
           location_city?: string | null
           location_state?: string | null
           longitude?: number | null
