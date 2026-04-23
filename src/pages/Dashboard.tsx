@@ -132,9 +132,42 @@ export default function Dashboard() {
     if (!enriched.length) return null;
     const avgPrice = enriched.reduce((a, l) => a + (l.avg_daily_price ?? 0), 0) / enriched.length;
     const avgProfit = enriched.reduce((a, l) => a + l.profit.monthlyProfit, 0) / enriched.length;
-    const top = enriched[0];
+    const top = [...enriched].sort((a, b) => b.profit.monthlyProfit - a.profit.monthlyProfit)[0];
     return { count: enriched.length, avgPrice, avgProfit, top };
   }, [enriched]);
+
+  // Price movers — compare current price vs latest snapshot ≥ 18h ago.
+  const { data: priceMovers } = useQuery({
+    queryKey: ["price-movers", city],
+    enabled: !!listings,
+    queryFn: async () => {
+      const snaps = await ds.snapshots();
+      const cutoff = Date.now() - 18 * 60 * 60 * 1000;
+      const prevByVehicle = new Map<string, { price: number; at: string }>();
+      for (const s of snaps) {
+        const t = new Date(s.scraped_at).getTime();
+        if (t > cutoff) continue;
+        if (s.avg_daily_price == null) continue;
+        const cur = prevByVehicle.get(s.vehicle_id);
+        if (!cur || new Date(cur.at).getTime() < t) {
+          prevByVehicle.set(s.vehicle_id, { price: Number(s.avg_daily_price), at: s.scraped_at });
+        }
+      }
+      const rows = (listings ?? [])
+        .filter((l) => city === "all" || l.city === city)
+        .map((l) => {
+          const prev = prevByVehicle.get(l.vehicle_id);
+          if (!prev || !l.avg_daily_price || prev.price <= 0) return null;
+          const now = Number(l.avg_daily_price);
+          const deltaPct = ((now - prev.price) / prev.price) * 100;
+          return { listing: l, prev: prev.price, now, deltaPct, prevAt: prev.at };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null && Math.abs(x.deltaPct) >= 5);
+      const risers = [...rows].sort((a, b) => b.deltaPct - a.deltaPct).slice(0, 6);
+      const fallers = [...rows].sort((a, b) => a.deltaPct - b.deltaPct).slice(0, 6);
+      return { risers, fallers };
+    },
+  });
 
   const profitByMake = useMemo(() => {
     if (!enriched.length) return [];
