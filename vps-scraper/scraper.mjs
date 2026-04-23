@@ -723,27 +723,83 @@ export async function launchBrowser() {
 }
 export { scrapeCity, scrapeSegment, CITIES, WINDOWS, PRICE_SEGMENTS, VEHICLE_TYPES, pool };
 
+// ---------- Queue mode ----------
+async function claimNextPendingRun() {
+  const { rows } = await pool.query(
+    `update scrape_runs
+        set status = 'running', started_at = now()
+      where id = (
+        select id
+          from scrape_runs
+         where status = 'pending'
+         order by started_at asc
+         limit 1
+         for update skip locked
+      )
+      returning id, city`,
+  );
+  return rows[0] ?? null;
+}
+
+async function drainPendingRuns(browser) {
+  let processed = 0;
+  while (true) {
+    const job = await claimNextPendingRun();
+    if (!job) break;
+
+    if (!CITIES[job.city]) {
+      await pool.query(
+        `update scrape_runs
+            set status='failed', error_message=$2, finished_at=now()
+          where id=$1`,
+        [job.id, `Unknown city slug "${job.city}". Add it to CITIES in scraper.mjs.`],
+      );
+      continue;
+    }
+
+    try {
+      await scrapeCity(browser, job.city, job.id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[queue] ${job.city} crashed:`, msg);
+      await pool.query(
+        `update scrape_runs
+            set status='failed', error_message=$2, finished_at=now()
+          where id=$1`,
+        [job.id, msg],
+      );
+    }
+
+    processed += 1;
+  }
+  return processed;
+}
+
 // ---------- Main ----------
 async function main() {
-  const cities = process.argv.slice(2).filter(Boolean);
+  const args = process.argv.slice(2).filter(Boolean);
+  const queueMode = args.includes("--queue");
+  const cities = args.filter((arg) => arg !== "--queue");
   const targets = cities.length ? cities : Object.keys(CITIES);
 
-  // One shared browser instance for the whole run — avoids the overhead of
-  // launching Chromium per segment while keeping a single clean process.
   const browser = await chromium.launch({ headless: true, args: BROWSER_ARGS });
   try {
-    for (const c of targets) {
-      try { await scrapeCity(browser, c); }
-      catch (e) { console.error(`City ${c} crashed:`, e); }
+    if (queueMode) {
+      const processed = await drainPendingRuns(browser);
+      console.log(`[queue] processed ${processed} pending run(s)`);
+    } else {
+      for (const c of targets) {
+        try { await scrapeCity(browser, c); }
+        catch (e) { console.error(`City ${c} crashed:`, e); }
+      }
+      await dumpJson();
     }
-    await dumpJson();
   } finally {
     await browser.close().catch(() => {});
     await pool.end();
   }
 }
 
-// Only run main when invoked directly (not when imported by test-scrape.mjs).
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   main().catch(e => { console.error(e); process.exit(1); });
