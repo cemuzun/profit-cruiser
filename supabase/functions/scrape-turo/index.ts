@@ -26,18 +26,24 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
 // ---------- Zyte helpers ----------
-async function zyteText(url: string): Promise<{ status: number; body: string }> {
+async function zyteText(
+  url: string,
+  opts: { browser?: boolean } = {},
+): Promise<{ status: number; body: string }> {
+  const reqBody: Record<string, unknown> = { url, geolocation: "US" };
+  if (opts.browser) {
+    // JS-rendered page (needed for Turo /search results which load via XHR).
+    reqBody.browserHtml = true;
+  } else {
+    reqBody.httpResponseBody = true;
+  }
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
       Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      url,
-      httpResponseBody: true,
-      geolocation: "US",
-    }),
+    body: JSON.stringify(reqBody),
   });
   if (!res.ok) {
     const txt = await res.text();
@@ -45,6 +51,11 @@ async function zyteText(url: string): Promise<{ status: number; body: string }> 
   }
   const data = await res.json();
   const status = data.statusCode ?? 0;
+
+  if (data.browserHtml) {
+    return { status, body: data.browserHtml as string };
+  }
+
   const raw = data.httpResponseBody as string | undefined;
   if (!raw) return { status, body: "" };
 
