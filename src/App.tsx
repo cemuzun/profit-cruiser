@@ -8,7 +8,7 @@ import CarDetail from "./pages/CarDetail.tsx";
 import Analyzer from "./pages/Analyzer.tsx";
 import Watchlist from "./pages/Watchlist.tsx";
 import Settings from "./pages/Settings.tsx";
-import Proxy from "./pages/Proxy.tsx";
+
 import Seasonality from "./pages/Seasonality.tsx";
 import Compare from "./pages/Compare.tsx";
 import NotFound from "./pages/NotFound.tsx";
@@ -29,7 +29,7 @@ const App = () => (
           <Route path="/compare" element={<Compare />} />
           <Route path="/seasonality" element={<Seasonality />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/settings/proxy" element={<Proxy />} />
+          
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
