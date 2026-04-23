@@ -1,7 +1,16 @@
-// Turo scraper using Zyte API as a proxy to Turo's internal search JSON API.
-// Turo's search page is client-rendered, so __NEXT_DATA__ is empty. Instead we
-// hit https://turo.com/api/v2/search (the same endpoint the SPA uses) through
-// Zyte's httpResponseBody+anti-bot to bypass Cloudflare. Returns JSON directly.
+// Turo scraper using Zyte API + SSR HTML + JSON-LD.
+//
+// Strategy (no auth, no browser, no Cloudflare bypass needed):
+//   1. Fetch Turo's official sitemaps to discover landing-page URLs for the
+//      city across all categories (car-rental, suv-rental, exotic-luxury, etc.)
+//   2. Fetch each landing page (plain HTTP via Zyte) and extract Honolulu
+//      vehicle URLs from the SSR HTML.
+//   3. Fetch each vehicle detail page and parse the embedded JSON-LD Product
+//      schema for price, rating, name, image.
+//   4. Upsert into listings_current + listings_snapshots.
+//
+// Cost: ~$0.40/1000 requests via Zyte basic HTTP. ~$0.05 per city per run
+// for ~100 vehicles.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
 
@@ -14,10 +23,10 @@ const corsHeaders = {
 const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-async function zyteJson(url: string): Promise<any> {
+// ---------- Zyte helpers ----------
+async function zyteText(url: string): Promise<{ status: number; body: string }> {
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
@@ -28,120 +37,195 @@ async function zyteJson(url: string): Promise<any> {
       url,
       httpResponseBody: true,
       geolocation: "US",
-      // Tell Zyte this is an XHR / API request
-      customHttpRequestHeaders: [
-        { name: "Accept", value: "application/json" },
-        { name: "Accept-Language", value: "en-US,en;q=0.9" },
-        { name: "Referer", value: "https://turo.com/us/en/search" },
-        { name: "x-csrf-token", value: "turo" },
-      ],
     }),
   });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`Zyte ${res.status}: ${txt.slice(0, 400)}`);
+    throw new Error(`Zyte ${res.status} for ${url}: ${txt.slice(0, 200)}`);
   }
   const data = await res.json();
-  if (!data.httpResponseBody) throw new Error("Zyte returned no httpResponseBody");
-  // httpResponseBody is base64-encoded
-  const decoded = atob(data.httpResponseBody);
-  try {
-    return JSON.parse(decoded);
-  } catch {
-    throw new Error(
-      `Response was not JSON (status ${data.statusCode}). First 300 chars: ${decoded.slice(0, 300)}`,
-    );
+  const status = data.statusCode ?? 0;
+  const raw = data.httpResponseBody as string | undefined;
+  if (!raw) return { status, body: "" };
+
+  // Decode base64
+  const bin = atob(raw);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+  // Try gunzip if URL ends in .gz
+  if (url.endsWith(".gz")) {
+    try {
+      const ds = new DecompressionStream("gzip");
+      const stream = new Blob([bytes]).stream().pipeThrough(ds);
+      const text = await new Response(stream).text();
+      return { status, body: text };
+    } catch {
+      // fall through and return raw
+    }
   }
+  return { status, body: new TextDecoder().decode(bytes) };
 }
 
-function num(v: any): number | null {
-  if (v === null || v === undefined) return null;
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : null;
+// ---------- Discovery ----------
+const CATEGORY_SLUGS = [
+  "car-rental",
+  "suv-rental",
+  "truck-rental",
+  "minivan-rental",
+  "van-rental",
+  "sports-rental",
+  "exotic-luxury-rental",
+  "convertible-rental",
+  "electric-vehicle-rental",
+];
+
+// Build the Turo city slug used in URLs. e.g. Honolulu, HI -> "honolulu-hi"
+function cityUrlSlug(city: { name: string; region: string | null }): string {
+  const name = city.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const region = (city.region ?? "").toLowerCase();
+  return region ? `${name}-${region}` : name;
 }
 
-function mapVehicle(v: any, city: string) {
-  const id = String(v.id ?? v.vehicleId ?? "");
-  if (!id) return null;
-  const make = v.make ?? v?.vehicle?.make ?? null;
-  const model = v.model ?? v?.vehicle?.model ?? null;
-  const year = num(v.year ?? v?.vehicle?.year);
-  const trim = v.trim ?? v?.vehicle?.trim ?? null;
-  const price =
-    num(v?.avgDailyPrice?.amount) ??
-    num(v?.dailyPricing?.priceWithCurrency?.amount) ??
-    num(v?.rate?.amount) ??
-    num(v?.dailyPriceWithCurrency?.amount) ??
-    num(v?.dailyPrice);
-  const trips = num(v?.completedTrips ?? v?.numberOfTrips ?? v?.trips);
-  const rating = num(v?.rating ?? v?.hostRating ?? v?.host?.rating);
-  const lat = num(v?.location?.latitude ?? v?.latitude);
-  const lon = num(v?.location?.longitude ?? v?.longitude);
-  const cityName = v?.location?.city ?? null;
-  const state = v?.location?.state ?? null;
-  const image =
-    v?.images?.[0]?.originalImageUrl ??
-    v?.images?.[0]?.url ??
-    v?.image?.originalImageUrl ??
-    v?.imageUrl ??
-    null;
-  const hostId = v?.host?.id ? String(v.host.id) : null;
-  const hostName = v?.host?.firstName ?? v?.host?.name ?? null;
-  const allStar = !!(v?.host?.allStarHost ?? v?.allStarHost);
+async function discoverVehicleIds(citySlugInUrl: string): Promise<
+  Array<{ id: string; href: string; make: string; model: string; type: string }>
+> {
+  const found = new Map<string, { id: string; href: string; make: string; model: string; type: string }>();
+  for (const cat of CATEGORY_SLUGS) {
+    const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}`;
+    let res;
+    try {
+      res = await zyteText(url);
+    } catch (e) {
+      console.warn(`landing fetch failed: ${cat}`, e);
+      continue;
+    }
+    if (res.status !== 200) continue;
+
+    // Match anchors that include this city in the path
+    const re = new RegExp(
+      `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
+      "g",
+    );
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(res.body)) !== null) {
+      const [whole, type, make, model, id] = m;
+      if (!found.has(id)) {
+        found.set(id, {
+          id,
+          href: `https://turo.com${whole}`,
+          make: make.replace(/-/g, " "),
+          model: model.replace(/-/g, " "),
+          type,
+        });
+      }
+    }
+    console.log(`  ${cat}: status=${res.status} bodyLen=${res.body.length} cumulativeIds=${found.size}`);
+  }
+  return [...found.values()];
+}
+
+// ---------- Detail parsing ----------
+type LdProduct = {
+  productID?: string;
+  name?: string;
+  description?: string;
+  image?: string[] | string;
+  offers?: { price?: number; priceCurrency?: string };
+  aggregateRating?: { ratingValue?: number; ratingCount?: number };
+  brand?: { name?: string };
+};
+
+function extractLdProduct(html: string): LdProduct | null {
+  // Turo embeds JSON-LD inside __next_s pushes:
+  //   self.__next_s=self.__next_s||[]).push([0,{"type":"application/ld+json","children":"{ ... escaped json ... }"}])
+  // We find the children string and JSON.parse it (it's a JSON-encoded JSON string).
+  const re = /"type":"application\/ld\+json","children":"((?:\\.|[^"\\])*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    try {
+      // m[1] is a JSON-string-escaped value. Wrap and parse to unescape.
+      const inner = JSON.parse(`"${m[1]}"`) as string;
+      const obj = JSON.parse(inner);
+      if (obj && obj["@type"] === "Product") return obj as LdProduct;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return null;
+}
+
+function parseYearAndModel(name: string | undefined, fallbackModel: string) {
+  // e.g. "BMW Z4 2020 rental in Honolulu, HI by Gabriel | Turo"
+  if (!name) return { year: null as number | null, model: fallbackModel };
+  const ym = name.match(/(\d{4})/);
+  const year = ym ? parseInt(ym[1], 10) : null;
+  return { year, model: fallbackModel };
+}
+
+async function fetchVehicle(
+  v: { id: string; href: string; make: string; model: string; type: string },
+  citySlug: string,
+) {
+  const res = await zyteText(v.href);
+  if (res.status !== 200) {
+    console.warn(`detail ${v.id}: status ${res.status}`);
+    return null;
+  }
+  const ld = extractLdProduct(res.body);
+  if (!ld) {
+    console.warn(`detail ${v.id}: no JSON-LD Product`);
+    return null;
+  }
+  const { year } = parseYearAndModel(ld.name, v.model);
+  const make = ld.brand?.name ?? v.make;
+  const price = typeof ld.offers?.price === "number" ? ld.offers.price : null;
+  const currency = ld.offers?.priceCurrency ?? "USD";
+  const rating = typeof ld.aggregateRating?.ratingValue === "number" ? ld.aggregateRating.ratingValue : null;
+  const trips = typeof ld.aggregateRating?.ratingCount === "number" ? ld.aggregateRating.ratingCount : null;
+  const image = Array.isArray(ld.image) ? ld.image[0] : ld.image ?? null;
+
+  // type slug like "exotic-luxury-rental" -> "EXOTIC"
+  const typeMap: Record<string, string> = {
+    "car-rental": "CAR",
+    "suv-rental": "SUV",
+    "truck-rental": "TRUCK",
+    "minivan-rental": "MINIVAN",
+    "van-rental": "VAN",
+    "sports-rental": "SPORTS",
+    "exotic-luxury-rental": "EXOTIC",
+    "convertible-rental": "CONVERTIBLE",
+    "electric-vehicle-rental": "EV",
+  };
 
   return {
-    vehicle_id: id,
-    city,
-    make,
-    model,
-    year: year ? Math.round(year) : null,
-    trim,
-    vehicle_type: v?.type ?? v?.vehicle?.type ?? v?.vehicleType ?? null,
-    fuel_type: v?.fuelType ?? v?.vehicle?.fuelType ?? null,
+    vehicle_id: v.id,
+    city: citySlug,
+    make: make ? String(make) : null,
+    model: v.model
+      ? v.model.replace(/\b\w/g, (c) => c.toUpperCase())
+      : null,
+    year,
+    trim: null,
+    vehicle_type: typeMap[v.type] ?? null,
+    fuel_type: v.type === "electric-vehicle-rental" ? "Electric" : null,
     avg_daily_price: price,
-    currency:
-      v?.avgDailyPrice?.currency ??
-      v?.dailyPricing?.priceWithCurrency?.currencyCode ??
-      "USD",
-    completed_trips: trips ? Math.round(trips) : null,
+    currency,
+    completed_trips: trips,
     rating,
-    is_all_star_host: allStar,
-    host_id: hostId,
-    host_name: hostName,
-    image_url: image,
-    location_city: cityName,
-    location_state: state,
-    latitude: lat,
-    longitude: lon,
+    is_all_star_host: false,
+    host_id: null,
+    host_name: null,
+    image_url: image ?? null,
+    location_city: null,
+    location_state: null,
+    latitude: null,
+    longitude: null,
     last_scraped_at: new Date().toISOString(),
   };
 }
 
-function buildSearchUrl(city: { name: string; latitude: number; longitude: number }) {
-  const start = new Date();
-  start.setDate(start.getDate() + 3);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 3);
-  const fmtDate = (d: Date) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-
-  // Turo's public search API
-  const params = new URLSearchParams({
-    country: "US",
-    defaultZoomLevel: "11",
-    itemsPerPage: "200",
-    locationType: "CITY",
-    region: "US",
-    sortType: "RELEVANCE",
-    location: city.name,
-    latitude: String(city.latitude),
-    longitude: String(city.longitude),
-    pickupTime: `${fmtDate(start)}T10:00`,
-    dropoffTime: `${fmtDate(end)}T10:00`,
-  });
-  return `https://turo.com/api/v2/search?${params.toString()}`;
-}
-
+// ---------- Orchestrator ----------
 async function runScrape(citySlug: string) {
   const startedAt = new Date().toISOString();
   const { data: runRow } = await supabase
@@ -159,34 +243,36 @@ async function runScrape(citySlug: string) {
       .single();
     if (cErr || !city) throw new Error(`Unknown city ${citySlug}`);
 
-    const url = buildSearchUrl({
-      name: city.name,
-      latitude: Number(city.latitude),
-      longitude: Number(city.longitude),
-    });
-    console.log("Zyte fetching API:", url);
+    const urlSlug = cityUrlSlug({ name: city.name, region: city.region });
+    console.log(`Discovering vehicles for ${citySlug} (urlSlug=${urlSlug})`);
+    const found = await discoverVehicleIds(urlSlug);
+    console.log(`Discovered ${found.length} unique vehicle URLs`);
 
-    const json = await zyteJson(url);
+    if (runId) {
+      await supabase
+        .from("scrape_runs")
+        .update({ segments_run: CATEGORY_SLUGS.length })
+        .eq("id", runId);
+    }
 
-    // Turo returns { vehicles: [...], totalCount, ... } or { searchResults: [...] }
-    const list: any[] =
-      json?.vehicles ??
-      json?.searchResults ??
-      json?.results ??
-      [];
-
-    console.log(
-      `API returned ${list.length} vehicles. Top-level keys: ${Object.keys(json ?? {}).join(",")}`,
-    );
-
-    const seen = new Set<string>();
-    const vehicles = list
-      .map((v) => mapVehicle(v, citySlug))
-      .filter((v): v is NonNullable<typeof v> => {
-        if (!v || !v.vehicle_id || seen.has(v.vehicle_id)) return false;
-        seen.add(v.vehicle_id);
-        return true;
-      });
+    // Fetch detail pages with limited concurrency
+    const CONCURRENCY = 5;
+    const vehicles: any[] = [];
+    let i = 0;
+    async function worker() {
+      while (i < found.length) {
+        const idx = i++;
+        const v = found[idx];
+        try {
+          const row = await fetchVehicle(v, citySlug);
+          if (row) vehicles.push(row);
+        } catch (e) {
+          console.warn(`vehicle ${v.id} error:`, e);
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    console.log(`Parsed ${vehicles.length} vehicles with prices`);
 
     if (vehicles.length) {
       const { error: upErr } = await supabase
@@ -211,7 +297,7 @@ async function runScrape(citySlug: string) {
         })
         .eq("id", runId);
     }
-    return { ok: true, vehicles: vehicles.length };
+    return { ok: true, vehicles: vehicles.length, discovered: found.length };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("scrape-turo error:", msg);
