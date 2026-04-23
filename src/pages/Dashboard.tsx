@@ -23,11 +23,23 @@ import {
 import { format } from "date-fns";
 import { CitiesManager } from "@/components/CitiesManager";
 
+type SortKey = "vehicle" | "city" | "price" | "p7" | "p14" | "p30" | "trips" | "rating" | "profit" | "margin";
+type SortDir = "asc" | "desc";
+
 export default function Dashboard() {
   const [city, setCity] = useState("all");
   const [search, setSearch] = useState("");
   const [fuelType, setFuelType] = useState("all");
-  const [sortBy, setSortBy] = useState<"profit" | "price" | "trips" | "rating">("profit");
+  const [cityFilter, setCityFilter] = useState("");
+  const [minPrice, setMinPrice] = useState("");
+  const [maxPrice, setMaxPrice] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("profit");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const toggleSort = (k: SortKey) => {
+    if (sortKey === k) setSortDir(sortDir === "asc" ? "desc" : "asc");
+    else { setSortKey(k); setSortDir(k === "vehicle" || k === "city" ? "asc" : "desc"); }
+  };
 
   const { data: globalCosts } = useGlobalCosts();
 
