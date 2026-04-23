@@ -351,7 +351,16 @@ async function runScrape(citySlug: string) {
 
     const urlSlug = cityUrlSlug({ name: city.name, region: city.region });
     console.log(`Discovering vehicles for ${citySlug} (urlSlug=${urlSlug})`);
-    const found = await discoverVehicleIds(urlSlug);
+    const found = await discoverVehicleIds(
+      {
+        name: city.name,
+        region: city.region,
+        latitude: Number(city.latitude),
+        longitude: Number(city.longitude),
+        place_id: city.place_id,
+      },
+      urlSlug,
+    );
     console.log(`Discovered ${found.length} unique vehicle URLs`);
 
     if (runId) {
