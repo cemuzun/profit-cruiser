@@ -233,6 +233,7 @@ async function fetchVehicle(
     host_id: null,
     host_name: null,
     image_url: image ?? null,
+    listing_url: v.href,
     location_city: null,
     location_state: null,
     latitude: null,
