@@ -778,8 +778,11 @@ async function drainPendingRuns(browser) {
 // ---------- Main ----------
 async function main() {
   const args = process.argv.slice(2).filter(Boolean);
-  const queueMode = args.includes("--queue");
-  const cities = args.filter((arg) => arg !== "--queue");
+  const command = args[0] ?? "scrape";
+  const queueMode = command === "queue" || args.includes("--queue");
+  const cities = queueMode
+    ? args.filter((arg, index) => index > 0 && arg !== "--queue")
+    : args.filter((arg) => arg !== "scrape");
   const targets = cities.length ? cities : Object.keys(CITIES);
 
   const browser = await chromium.launch({ headless: true, args: BROWSER_ARGS });
