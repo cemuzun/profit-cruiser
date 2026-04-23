@@ -442,6 +442,53 @@ function EmptyChart({ label }: { label: string }) {
   return <div className="h-full flex items-center justify-center text-sm text-muted-foreground">{label}</div>;
 }
 
+type MoverItem = { listing: Listing; prev: number; now: number; deltaPct: number; prevAt: string };
+
+function MoversCard({
+  title, items, tone, emptyLabel,
+}: { title: string; items: MoverItem[]; tone: "up" | "down"; emptyLabel: string }) {
+  const Icon = tone === "up" ? TrendingUp : TrendingDown;
+  const color = tone === "up" ? "text-success" : "text-danger";
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="text-sm font-medium mb-2 flex items-center gap-2">
+          <Icon className={`h-4 w-4 ${color}`} />
+          {title}
+        </div>
+        {items.length === 0 ? (
+          <div className="py-8 text-center text-xs text-muted-foreground">{emptyLabel}</div>
+        ) : (
+          <div className="space-y-1.5">
+            {items.map((m) => (
+              <Link
+                key={m.listing.vehicle_id}
+                to={`/car/${m.listing.vehicle_id}`}
+                className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted/50 transition-colors"
+              >
+                {m.listing.image_url && (
+                  <img src={m.listing.image_url} alt="" className="h-7 w-10 object-cover rounded" loading="lazy" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium truncate">
+                    {m.listing.year} {m.listing.make} {m.listing.model}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate">
+                    {m.listing.city} · {fmtUSD(m.prev)} → {fmtUSD(m.now)}
+                  </div>
+                </div>
+                <div className={`text-sm font-semibold tabular-nums ${color}`}>
+                  {m.deltaPct > 0 ? "+" : ""}{m.deltaPct.toFixed(1)}%
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function SortableHead({
   k, label, align = "left", sortKey, sortDir, onClick,
 }: {
