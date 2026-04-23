@@ -192,6 +192,12 @@ async function discoverVehicleIds(
   console.log(`[search] done with ${found.size} vehicles, falling back to category pages`);
 
   // --- Step 2: Category landing pages as fallback (catches anything missed) ---
+  // Category fallback uses a city-scoped regex to avoid mis-attributing vehicles.
+  const cityRe = new RegExp(
+    `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
+    "g",
+  );
+
   for (const cat of CATEGORY_SLUGS) {
     for (const [lo, hi] of PRICE_BUCKETS) {
       const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`;
@@ -205,8 +211,8 @@ async function discoverVehicleIds(
       if (res.status !== 200) continue;
       const before = found.size;
       let m: RegExpExecArray | null;
-      re.lastIndex = 0;
-      while ((m = re.exec(res.body)) !== null) {
+      cityRe.lastIndex = 0;
+      while ((m = cityRe.exec(res.body)) !== null) {
         const [whole, type, make, model, id] = m;
         if (!found.has(id)) {
           found.set(id, {
