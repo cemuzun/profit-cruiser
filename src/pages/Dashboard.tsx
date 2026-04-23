@@ -489,24 +489,3 @@ function MoversCard({
   );
 }
 
-function SortableHead({
-  k, label, align = "left", sortKey, sortDir, onClick,
-}: {
-  k: SortKey; label: string; align?: "left" | "right";
-  sortKey: SortKey; sortDir: SortDir; onClick: (k: SortKey) => void;
-}) {
-  const active = sortKey === k;
-  const Icon = active ? (sortDir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
-  return (
-    <TableHead className={align === "right" ? "text-right" : ""}>
-      <button
-        type="button"
-        onClick={() => onClick(k)}
-        className={`inline-flex items-center gap-1 hover:text-foreground transition-colors ${active ? "text-foreground font-semibold" : ""} ${align === "right" ? "flex-row-reverse" : ""}`}
-      >
-        {label}
-        <Icon className="h-3 w-3 opacity-60" />
-      </button>
-    </TableHead>
-  );
-}
