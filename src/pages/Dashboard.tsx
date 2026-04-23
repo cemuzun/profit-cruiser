@@ -228,6 +228,8 @@ export default function Dashboard() {
           </div>
         </div>
 
+        <ScrapeProgress />
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi icon={CarIcon} label="Listings tracked" value={kpis?.count ?? 0} />
           <Kpi icon={DollarSign} label="Avg daily price" value={fmtUSD(kpis?.avgPrice)} />
