@@ -208,7 +208,7 @@ async function discoverVehicleIds(
 
   for (const [lo, hi] of PRICE_BUCKETS) {
     try {
-      const res = await zyteText(buildSearchUrl(city, { minPrice: lo, maxPrice: hi }));
+      const res = await zyteText(buildSearchUrl(city, { minPrice: lo, maxPrice: hi }), { browser: true });
       if (res.status !== 200) continue;
       const added = harvestFromHtml(res.body, found);
       console.log(`  search $${lo}-${hi}: +${added} (total ${found.size})`);
