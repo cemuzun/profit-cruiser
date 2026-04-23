@@ -21,6 +21,7 @@ import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, BarChart, Bar, CartesianGrid,
 } from "recharts";
 import { format } from "date-fns";
+import { ScrapeProgress } from "@/components/ScrapeProgress";
 
 type SortKey = "vehicle" | "city" | "price" | "p7" | "p14" | "p30" | "trips" | "rating" | "profit" | "margin";
 type SortDir = "asc" | "desc";
@@ -226,6 +227,8 @@ export default function Dashboard() {
             </Select>
           </div>
         </div>
+
+        <ScrapeProgress />
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <Kpi icon={CarIcon} label="Listings tracked" value={kpis?.count ?? 0} />
