@@ -451,29 +451,9 @@ async function fetchVehicle(
       );
     }
   } else if (ldPriceCandidate != null) {
-    // No trusted source available. Only accept ld.offers.price if it passes
-    // a class-based plausibility check based on vehicle make. Ceilings are
-    // intentionally generous — real Turo listings for hyper/exotic cars
-    // routinely exceed $2,500/day, and the goal here is only to reject
-    // obvious garbage (e.g. 6-figure deposit values), not to cap real prices.
-    const make = (ld.brand?.name ?? v.make ?? "").toLowerCase();
-    const plausibleMax = (() => {
-      // Hyper-exotics: Bugatti, Koenigsegg, Pagani — can be $5k-$10k+/day
-      if (/bugatti|koenigsegg|pagani/.test(make)) return 15000;
-      // Exotics & ultra-luxury — Ferrari, Lambo, McLaren, Rolls, Bentley, Aston
-      if (/ferrari|lamborghini|mclaren|rolls|bentley|aston|maybach/.test(make)) return 5000;
-      // Luxury / performance — Porsche, AMG, Maserati, high-end Audi/BMW
-      if (/maserati|porsche|lucid|mercedes|amg|bmw|audi|land.?rover|range.?rover|cadillac|lexus|genesis|tesla/.test(make)) return 2000;
-      // Everything else
-      return 800;
-    })();
-    if (ldPriceCandidate <= plausibleMax) {
-      price = ldPriceCandidate;
-    } else {
-      console.warn(
-        `detail ${v.id}: only ld.offers.price=${ldPriceCandidate} available, exceeds plausible max ${plausibleMax} for ${make} — dropping`,
-      );
-    }
+    // No trusted source available — fall back to ld.offers.price as-is.
+    // No ceiling: we want the real number even for $5k+/day hyper-exotics.
+    price = ldPriceCandidate;
   }
 
   // Class-based MIN floor — drop absurdly low prices for premium vehicles.
