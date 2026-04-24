@@ -32,16 +32,53 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 const WINDOW_DAYS = 90;
 
 // ---------- Fetch helpers ----------
+type ZyteResult = {
+  status: number;
+  body: string;
+  /** XHRs intercepted by Zyte's networkCapture, decoded to text. */
+  network: Array<{ url: string; status: number; body: string }>;
+};
+
 async function zyteFetch(
   url: string,
-  opts: { json?: boolean; browser?: boolean } = {},
-): Promise<{ status: number; body: string }> {
+  opts: {
+    json?: boolean;
+    /** Render in a headless browser. ~10x cost vs basic. */
+    browser?: boolean;
+    /** Substrings to capture from the rendered page's network traffic.
+     *  Each match returns the response body. Required for Turo calendar
+     *  data, which is hydrated via XHR after first paint. */
+    captureUrls?: string[];
+    /** Extra wait (s) after navigation, to give XHRs time to fire. */
+    waitSeconds?: number;
+    /** CSS selector for an element to scroll into view to trigger lazy XHRs.
+     *  Turo only fetches calendar data when the booking widget is visible. */
+    scrollToSelector?: string;
+  } = {},
+): Promise<ZyteResult> {
   const reqBody: Record<string, unknown> = { url, geolocation: "US" };
   if (opts.browser) {
-    // Browser-rendered. Required for Turo's listing pages because the
-    // calendar/availability data is hydrated via authenticated XHR after
-    // first paint and is not present in the SSR HTML. ~10x cost vs basic.
     reqBody.browserHtml = true;
+    if (opts.captureUrls?.length) {
+      reqBody.networkCapture = opts.captureUrls.map((sub) => ({
+        filterType: "url",
+        value: sub,
+        matchType: "contains",
+        httpResponseBody: true,
+      }));
+    }
+    const actions: Array<Record<string, unknown>> = [];
+    if (opts.scrollToSelector) {
+      actions.push({
+        action: "scrollBottom",
+        maxScrollCount: 3,
+        maxScrollDelay: 0.5,
+      });
+    }
+    if (opts.waitSeconds) {
+      actions.push({ action: "waitForTimeout", timeout: opts.waitSeconds });
+    }
+    if (actions.length) reqBody.actions = actions;
   } else {
     reqBody.httpResponseBody = true;
     if (opts.json) {
@@ -51,6 +88,7 @@ async function zyteFetch(
       ];
     }
   }
+
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
@@ -59,16 +97,38 @@ async function zyteFetch(
     },
     body: JSON.stringify(reqBody),
   });
-  if (!res.ok) return { status: res.status, body: "" };
+  if (!res.ok) return { status: res.status, body: "", network: [] };
   const data = await res.json();
   const status = data.statusCode ?? 0;
-  if (data.browserHtml) return { status, body: data.browserHtml as string };
+
+  // Decode networkCapture entries (base64-encoded response bodies).
+  const network: ZyteResult["network"] = [];
+  const captured = (data.networkCapture ?? []) as Array<any>;
+  for (const cap of captured) {
+    const respUrl = cap?.httpResponseUrl ?? cap?.url ?? "";
+    const respStatus = cap?.httpResponseStatus ?? 0;
+    const raw = cap?.httpResponseBody as string | undefined;
+    if (!raw) {
+      network.push({ url: respUrl, status: respStatus, body: "" });
+      continue;
+    }
+    try {
+      const bin = atob(raw);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      network.push({ url: respUrl, status: respStatus, body: new TextDecoder().decode(bytes) });
+    } catch {
+      network.push({ url: respUrl, status: respStatus, body: "" });
+    }
+  }
+
+  if (data.browserHtml) return { status, body: data.browserHtml as string, network };
   const raw = data.httpResponseBody as string | undefined;
-  if (!raw) return { status, body: "" };
+  if (!raw) return { status, body: "", network };
   const bin = atob(raw);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return { status, body: new TextDecoder().decode(bytes) };
+  return { status, body: new TextDecoder().decode(bytes), network };
 }
 
 async function backupProxyFetch(url: string): Promise<{ status: number; body: string }> {
@@ -115,37 +175,27 @@ function buildDateRange(days: number): { start: string; end: string; all: string
   return { start: ymd(start), end: ymd(end), all };
 }
 
-// Try Turo's daily_pricing API. Returns per-day rows on success, [] otherwise.
-async function tryDailyPricingApi(
+/** Parse one Turo daily-pricing JSON payload (whatever shape) into DayRows. */
+function parseDailyPricingJson(
+  parsed: unknown,
   vehicleId: string,
   city: string | null,
-  start: string,
-  end: string,
-): Promise<DayRow[]> {
-  const url = `https://turo.com/api/vehicle/daily_pricing/v1?vehicleId=${vehicleId}&start=${start}&end=${end}&country=US`;
-  let res = await zyteFetch(url, { json: true });
-  if (res.status !== 200 || !res.body) {
-    res = await backupProxyFetch(url);
-  }
-  if (res.status !== 200 || !res.body) return [];
-  let parsed: any;
-  try {
-    parsed = JSON.parse(res.body);
-  } catch {
-    return [];
-  }
-  // Endpoint shape varies. Look for arrays of {date, price, available} or
-  // {date, customPrice, status} or nested under .dailyPricingResponses.
+  source: string,
+): DayRow[] {
+  if (!parsed || typeof parsed !== "object") return [];
+  const p = parsed as Record<string, any>;
   const list: any[] =
-    parsed?.dailyPricingResponses ??
-    parsed?.dailyPrices ??
-    parsed?.prices ??
-    (Array.isArray(parsed) ? parsed : []);
+    p.dailyPricingResponses ??
+    p.dailyPrices ??
+    p.prices ??
+    p.dailyPricing ??
+    p.calendar ??
+    (Array.isArray(parsed) ? (parsed as any[]) : []);
   if (!Array.isArray(list) || list.length === 0) return [];
 
   const out: DayRow[] = [];
   for (const item of list) {
-    const day = item?.date ?? item?.day;
+    const day: string | undefined = item?.date ?? item?.day ?? item?.localDate;
     if (!day || typeof day !== "string") continue;
     const price =
       typeof item?.price === "number"
@@ -154,16 +204,21 @@ async function tryDailyPricingApi(
           ? item.customPrice
           : typeof item?.priceWithCurrency?.amount === "number"
             ? item.priceWithCurrency.amount
-            : null;
-    // Availability can come as boolean, status string, or "wholesalePriceWithCurrency" presence.
+            : typeof item?.amount === "number"
+              ? item.amount
+              : null;
     let available: boolean | null = null;
     if (typeof item?.available === "boolean") available = item.available;
     else if (typeof item?.isAvailable === "boolean") available = item.isAvailable;
+    else if (typeof item?.unavailable === "boolean") available = !item.unavailable;
+    else if (typeof item?.wholeDayUnavailable === "boolean")
+      // Turo's daily_pricing endpoint marks blocked days as wholeDayUnavailable.
+      available = !item.wholeDayUnavailable;
     else if (typeof item?.status === "string") {
       const s = item.status.toUpperCase();
-      if (s.includes("AVAILABLE")) available = true;
-      else if (s.includes("UNAVAILABLE") || s.includes("BOOKED") || s.includes("BLOCKED"))
+      if (s.includes("UNAVAILABLE") || s.includes("BOOKED") || s.includes("BLOCKED"))
         available = false;
+      else if (s === "AVAILABLE" || s.includes("BOOKABLE")) available = true;
     }
     out.push({
       vehicle_id: vehicleId,
@@ -172,52 +227,71 @@ async function tryDailyPricingApi(
       is_available: available,
       daily_price: price,
       currency: "USD",
-      source: "api",
+      source,
     });
   }
   return out;
 }
 
-// HTML fallback: parse listing detail page for blocked/unavailable days.
-// Turo embeds calendar state inside __NEXT_DATA__ or inline JSON. We look for
-// arrays of unavailable date strings in YYYY-MM-DD form.
-async function tryHtmlFallback(
+/**
+ * Capture Turo's calendar XHR by rendering the listing in a headless browser
+ * with Zyte and intercepting the network response. Turo's frontend hits
+ * `/api/vehicle/daily_pricing/v1?vehicleId=…` automatically when the booking
+ * widget mounts, so we wait a few seconds after navigation.
+ *
+ * Returns parsed rows on success, [] otherwise.
+ */
+async function tryBrowserCalendar(
   vehicleId: string,
   city: string | null,
   listingUrl: string | null,
-  allDays: string[],
-): Promise<DayRow[]> {
+): Promise<{ rows: DayRow[]; usedSource: "xhr" | "html" | "none" }> {
   const href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
-  let res = await zyteFetch(href);
-  if (res.status !== 200 || !res.body) {
-    res = await backupProxyFetch(href);
-  }
-  if (!res.body) return [];
+  const r = await zyteFetch(href, {
+    browser: true,
+    captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
+    scrollToSelector: "form",
+    waitSeconds: 6,
+  });
 
-  // Heuristic: collect every YYYY-MM-DD inside an "unavailable"/"booked"/"blocked"
-  // adjacent JSON segment. Scope each match to a small window around the keyword.
-  const unavailable = new Set<string>();
-  const re = /(unavailable|blocked|booked|reservedDates|unavailableDates)[^[{]{0,200}([\s\S]{0,2000})/gi;
+  // Prefer a captured XHR that returned a JSON body. (Zyte's networkCapture
+  // sometimes reports status 0 even on 200 — gate on body shape instead.)
+  for (const cap of r.network) {
+    if (!cap.body || cap.body[0] !== "{") continue;
+    if (!/daily_pricing|calendar|dailyPricing/i.test(cap.url)) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(cap.body); } catch { continue; }
+    const rows = parseDailyPricingJson(parsed, vehicleId, city, "xhr");
+    if (rows.length) return { rows, usedSource: "xhr" };
+  }
+
+  // No XHR captured (or all empty): try parsing inline JSON in the rendered HTML.
+  if (r.body) {
+    const inlineRows = parseInlineCalendarFromHtml(r.body, vehicleId, city);
+    if (inlineRows.length) return { rows: inlineRows, usedSource: "html" };
+  }
+  return { rows: [], usedSource: "none" };
+}
+
+/** Look inside the rendered HTML (e.g. __NEXT_DATA__ payload) for a calendar
+ *  array. Used as a no-extra-cost fallback after browser render. */
+function parseInlineCalendarFromHtml(
+  html: string,
+  vehicleId: string,
+  city: string | null,
+): DayRow[] {
+  const re = /"(?:dailyPricingResponses|dailyPrices|dailyPricing)"\s*:\s*(\[[\s\S]{0,200000}?\])/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(res.body)) !== null) {
-    const segment = m[2];
-    const dateRe = /(20\d{2}-[01]\d-[0-3]\d)/g;
-    let dm: RegExpExecArray | null;
-    while ((dm = dateRe.exec(segment)) !== null) {
-      unavailable.add(dm[1]);
+  while ((m = re.exec(html)) !== null) {
+    try {
+      const arr = JSON.parse(m[1]);
+      const rows = parseDailyPricingJson({ dailyPricing: arr }, vehicleId, city, "html");
+      if (rows.length) return rows;
+    } catch {
+      /* keep scanning */
     }
   }
-  if (unavailable.size === 0) return [];
-
-  return allDays.map((day) => ({
-    vehicle_id: vehicleId,
-    city,
-    day,
-    is_available: !unavailable.has(day),
-    daily_price: null,
-    currency: "USD",
-    source: "html",
-  }));
+  return [];
 }
 
 // ---------- Orchestrator ----------
@@ -246,26 +320,28 @@ async function runCalendarScrape(opts: {
     const list = vehicles ?? [];
     if (!list.length) throw new Error("no vehicles to scrape");
 
-    const { start, end, all } = buildDateRange(WINDOW_DAYS);
+    // Trim returned rows to the next 90 days only — Turo's payload sometimes
+    // returns a longer window than we want to store.
+    const { all } = buildDateRange(WINDOW_DAYS);
+    const validDays = new Set(all);
 
     let okCount = 0;
     let failCount = 0;
-    let apiCount = 0;
+    let xhrCount = 0;
     let htmlCount = 0;
 
-    const CONCURRENCY = 4;
+    // Browser-rendered Zyte requests are slow + expensive. Keep concurrency low
+    // so we don't burn through the Zyte rate limit on a 1k-vehicle batch.
+    const CONCURRENCY = 3;
     let i = 0;
     async function worker() {
       while (i < list.length) {
         const idx = i++;
         const v = list[idx] as { vehicle_id: string; city: string | null; listing_url: string | null };
         try {
-          let rows = await tryDailyPricingApi(v.vehicle_id, v.city, start, end);
-          let usedSource = "api";
-          if (rows.length === 0) {
-            rows = await tryHtmlFallback(v.vehicle_id, v.city, v.listing_url, all);
-            usedSource = "html";
-          }
+          const { rows: rawRows, usedSource } =
+            await tryBrowserCalendar(v.vehicle_id, v.city, v.listing_url);
+          const rows = rawRows.filter((r) => validDays.has(r.day));
           if (rows.length === 0) {
             failCount++;
             continue;
@@ -280,8 +356,8 @@ async function runCalendarScrape(opts: {
             continue;
           }
           okCount++;
-          if (usedSource === "api") apiCount++;
-          else htmlCount++;
+          if (usedSource === "xhr") xhrCount++;
+          else if (usedSource === "html") htmlCount++;
         } catch (e) {
           console.warn(`vehicle ${v.vehicle_id} error:`, e);
           failCount++;
@@ -299,7 +375,7 @@ async function runCalendarScrape(opts: {
           vehicles_attempted: list.length,
           vehicles_ok: okCount,
           vehicles_failed: failCount,
-          source_api_count: apiCount,
+          source_api_count: xhrCount,
           source_html_count: htmlCount,
         })
         .eq("id", runId);
@@ -309,7 +385,7 @@ async function runCalendarScrape(opts: {
       attempted: list.length,
       ok_count: okCount,
       fail_count: failCount,
-      api_count: apiCount,
+      xhr_count: xhrCount,
       html_count: htmlCount,
       window_days: WINDOW_DAYS,
     };
@@ -355,7 +431,12 @@ Deno.serve(async (req) => {
           { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      const r = await zyteFetch(existing.listing_url, { browser: true });
+      const r = await zyteFetch(existing.listing_url, {
+        browser: true,
+        captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
+        scrollToSelector: "form",
+        waitSeconds: 6,
+      });
       // Look for hot patterns near "unavailable" / date arrays / per-day price.
       const hints: Array<{ tag: string; sample: string }> = [];
       const patterns: Array<[string, RegExp]> = [
@@ -380,6 +461,22 @@ Deno.serve(async (req) => {
       const dre = /"(20\d{2}-[01]\d-[0-3]\d)"/g;
       let dm: RegExpExecArray | null;
       while ((dm = dre.exec(r.body)) !== null) dates.add(dm[1]);
+      // Also try parsing each captured XHR with our real parser, so the
+      // probe response shows whether tryBrowserCalendar would succeed.
+      const xhrSummary = r.network.map((cap) => {
+        let parsedRows = 0;
+        try {
+          const parsed = JSON.parse(cap.body);
+          parsedRows = parseDailyPricingJson(parsed, vehicleId, existing.city ?? null, "xhr").length;
+        } catch { /* ignore */ }
+        return {
+          url: cap.url,
+          status: cap.status,
+          body_len: cap.body.length,
+          parsed_rows: parsedRows,
+          body_sample: cap.body.slice(0, 400),
+        };
+      });
       return new Response(
         JSON.stringify({
           listing_url: existing.listing_url,
@@ -388,6 +485,7 @@ Deno.serve(async (req) => {
           unique_iso_dates_in_body: dates.size,
           first_20_dates: [...dates].sort().slice(0, 20),
           hints,
+          xhr_captured: xhrSummary,
         }, null, 2),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
