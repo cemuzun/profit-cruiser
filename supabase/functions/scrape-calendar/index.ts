@@ -371,7 +371,7 @@ async function runCalendarScrape(opts: {
           vehicles_attempted: list.length,
           vehicles_ok: okCount,
           vehicles_failed: failCount,
-          source_api_count: apiCount,
+          source_api_count: xhrCount,
           source_html_count: htmlCount,
         })
         .eq("id", runId);
@@ -381,7 +381,7 @@ async function runCalendarScrape(opts: {
       attempted: list.length,
       ok_count: okCount,
       fail_count: failCount,
-      api_count: apiCount,
+      xhr_count: xhrCount,
       html_count: htmlCount,
       window_days: WINDOW_DAYS,
     };
