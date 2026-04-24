@@ -34,34 +34,37 @@ const WINDOW_DAYS = 90;
 // ---------- Fetch helpers ----------
 async function zyteFetch(
   url: string,
-  opts: { json?: boolean } = {},
+  opts: { json?: boolean; browser?: boolean } = {},
 ): Promise<{ status: number; body: string }> {
+  const reqBody: Record<string, unknown> = { url, geolocation: "US" };
+  if (opts.browser) {
+    // Browser-rendered. Required for Turo's listing pages because the
+    // calendar/availability data is hydrated via authenticated XHR after
+    // first paint and is not present in the SSR HTML. ~10x cost vs basic.
+    reqBody.browserHtml = true;
+    reqBody.javascript = true;
+    reqBody.actions = [{ action: "waitForTimeout", timeout: 4000 }];
+  } else {
+    reqBody.httpResponseBody = true;
+    if (opts.json) {
+      reqBody.customHttpRequestHeaders = [
+        { name: "Accept", value: "application/json" },
+        { name: "User-Agent", value: "Mozilla/5.0" },
+      ];
+    }
+  }
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
       Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      url,
-      geolocation: "US",
-      httpResponseBody: true,
-      // Some Turo API endpoints require these headers to return JSON.
-      ...(opts.json
-        ? {
-            customHttpRequestHeaders: [
-              { name: "Accept", value: "application/json" },
-              { name: "User-Agent", value: "Mozilla/5.0" },
-            ],
-          }
-        : {}),
-    }),
+    body: JSON.stringify(reqBody),
   });
-  if (!res.ok) {
-    return { status: res.status, body: "" };
-  }
+  if (!res.ok) return { status: res.status, body: "" };
   const data = await res.json();
   const status = data.statusCode ?? 0;
+  if (data.browserHtml) return { status, body: data.browserHtml as string };
   const raw = data.httpResponseBody as string | undefined;
   if (!raw) return { status, body: "" };
   const bin = atob(raw);
