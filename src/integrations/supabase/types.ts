@@ -14,6 +14,48 @@ export type Database = {
   }
   public: {
     Tables: {
+      calendar_scrape_runs: {
+        Row: {
+          city: string | null
+          error_message: string | null
+          finished_at: string | null
+          id: string
+          source_api_count: number | null
+          source_html_count: number | null
+          started_at: string
+          status: string
+          vehicles_attempted: number | null
+          vehicles_failed: number | null
+          vehicles_ok: number | null
+        }
+        Insert: {
+          city?: string | null
+          error_message?: string | null
+          finished_at?: string | null
+          id?: string
+          source_api_count?: number | null
+          source_html_count?: number | null
+          started_at?: string
+          status: string
+          vehicles_attempted?: number | null
+          vehicles_failed?: number | null
+          vehicles_ok?: number | null
+        }
+        Update: {
+          city?: string | null
+          error_message?: string | null
+          finished_at?: string | null
+          id?: string
+          source_api_count?: number | null
+          source_html_count?: number | null
+          started_at?: string
+          status?: string
+          vehicles_attempted?: number | null
+          vehicles_failed?: number | null
+          vehicles_ok?: number | null
+        }
+        Relationships: []
+      }
       cities: {
         Row: {
           active: boolean
@@ -184,6 +226,48 @@ export type Database = {
           turo_fee_pct?: number | null
           updated_at?: string
           utilization_pct?: number | null
+          vehicle_id?: string
+        }
+        Relationships: []
+      }
+      listing_calendar_days: {
+        Row: {
+          captured_on: string
+          city: string | null
+          created_at: string
+          currency: string | null
+          daily_price: number | null
+          day: string
+          id: string
+          is_available: boolean | null
+          raw: Json | null
+          source: string | null
+          vehicle_id: string
+        }
+        Insert: {
+          captured_on?: string
+          city?: string | null
+          created_at?: string
+          currency?: string | null
+          daily_price?: number | null
+          day: string
+          id?: string
+          is_available?: boolean | null
+          raw?: Json | null
+          source?: string | null
+          vehicle_id: string
+        }
+        Update: {
+          captured_on?: string
+          city?: string | null
+          created_at?: string
+          currency?: string | null
+          daily_price?: number | null
+          day?: string
+          id?: string
+          is_available?: boolean | null
+          raw?: Json | null
+          source?: string | null
           vehicle_id?: string
         }
         Relationships: []
@@ -559,7 +643,15 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      trip_count_daily: {
+        Row: {
+          day: string | null
+          trips_delta: number | null
+          trips_eod: number | null
+          vehicle_id: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       [_ in never]: never
