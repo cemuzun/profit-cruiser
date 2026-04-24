@@ -583,9 +583,12 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+      // Don't overwrite previously-good fields with null (price/rating/trips
+      // can be null when the sanity guard rejects a parse, or when CF blocks).
+      const cleanRow = stripNulls(row, ["avg_daily_price", "rating", "completed_trips", "image_url"]);
       const { error: upErr } = await supabase
         .from("listings_current")
-        .upsert(row, { onConflict: "vehicle_id" });
+        .upsert(cleanRow, { onConflict: "vehicle_id" });
       if (upErr) throw upErr;
       return new Response(JSON.stringify({ ok: true, vehicle: row }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
