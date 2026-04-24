@@ -368,6 +368,60 @@ export type Database = {
         }
         Relationships: []
       }
+      price_anomalies: {
+        Row: {
+          attempted_price: number | null
+          city: string | null
+          detected_at: string
+          id: string
+          kept_price: number | null
+          listing_url: string | null
+          make: string | null
+          model: string | null
+          previous_price: number | null
+          reason: string
+          reviewed: boolean
+          reviewed_at: string | null
+          source: string | null
+          vehicle_id: string
+          year: number | null
+        }
+        Insert: {
+          attempted_price?: number | null
+          city?: string | null
+          detected_at?: string
+          id?: string
+          kept_price?: number | null
+          listing_url?: string | null
+          make?: string | null
+          model?: string | null
+          previous_price?: number | null
+          reason: string
+          reviewed?: boolean
+          reviewed_at?: string | null
+          source?: string | null
+          vehicle_id: string
+          year?: number | null
+        }
+        Update: {
+          attempted_price?: number | null
+          city?: string | null
+          detected_at?: string
+          id?: string
+          kept_price?: number | null
+          listing_url?: string | null
+          make?: string | null
+          model?: string | null
+          previous_price?: number | null
+          reason?: string
+          reviewed?: boolean
+          reviewed_at?: string | null
+          source?: string | null
+          vehicle_id?: string
+          year?: number | null
+        }
+        Relationships: []
+      }
       price_forecasts: {
         Row: {
           avg_price: number | null
