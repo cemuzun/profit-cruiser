@@ -498,9 +498,12 @@ async function runScrape(citySlug: string) {
     console.log(`Parsed ${vehicles.length} vehicles with prices`);
 
     if (vehicles.length) {
+      const cleaned = vehicles.map((v) =>
+        stripNulls(v, ["avg_daily_price", "rating", "completed_trips", "image_url"]),
+      );
       const { error: upErr } = await supabase
         .from("listings_current")
-        .upsert(vehicles, { onConflict: "vehicle_id" });
+        .upsert(cleaned, { onConflict: "vehicle_id" });
       if (upErr) throw upErr;
 
       const snaps = vehicles.map((v) => {
