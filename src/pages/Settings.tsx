@@ -170,6 +170,64 @@ export default function Settings() {
 
         <Card>
           <CardContent className="pt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold">Scrape filters</h2>
+              {filterForm && (
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="scrape-filters-enabled" className="text-xs text-muted-foreground">Enabled</Label>
+                  <Switch
+                    id="scrape-filters-enabled"
+                    checked={filterForm.enabled}
+                    onCheckedChange={(v) => setFilterForm({ ...filterForm, enabled: v })}
+                  />
+                </div>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Limit which listings the scraper fetches. Categories you uncheck are skipped entirely. Price/year ranges narrow discovery and drop out-of-range vehicles before they're saved. Leave a field blank for no limit.
+            </p>
+
+            {filterForm && (
+              <>
+                <div>
+                  <Label className="text-sm">Vehicle types</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-1.5">
+                    {ALL_VEHICLE_TYPES.map((t) => (
+                      <label key={t} className="flex items-center gap-2 text-sm border border-border rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/40">
+                        <Checkbox
+                          checked={filterForm.vehicle_types.includes(t)}
+                          onCheckedChange={() => toggleType(t)}
+                        />
+                        <span>{t.replace(/-rental$/, "").replace(/-/g, " ")}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">Empty selection = all types.</p>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Field label="Min $/day" value={filterForm.min_daily_price ?? ""} onChange={setNum("min_daily_price")} />
+                  <Field label="Max $/day" value={filterForm.max_daily_price ?? ""} onChange={setNum("max_daily_price")} />
+                  <Field label="Min year" value={filterForm.min_year ?? ""} onChange={setNum("min_year")} />
+                  <Field label="Max year" value={filterForm.max_year ?? ""} onChange={setNum("max_year")} />
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <Button onClick={() => saveFilters.mutate()} disabled={saveFilters.isPending}>Save filters</Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setFilterForm({ vehicle_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, enabled: true })}
+                  >
+                    Reset
+                  </Button>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="pt-4 space-y-3">
             <h2 className="font-semibold">Scrape runs</h2>
             <p className="text-xs text-muted-foreground">Auto-scrape runs daily at 09:00 UTC. You can also trigger runs from the dashboard. Latest 50 runs shown.</p>
             <div className="space-y-1.5">
