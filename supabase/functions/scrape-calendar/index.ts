@@ -427,7 +427,12 @@ Deno.serve(async (req) => {
           { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
       }
-      const r = await zyteFetch(existing.listing_url, { browser: true });
+      const r = await zyteFetch(existing.listing_url, {
+        browser: true,
+        captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
+        scrollToSelector: "form",
+        waitSeconds: 6,
+      });
       // Look for hot patterns near "unavailable" / date arrays / per-day price.
       const hints: Array<{ tag: string; sample: string }> = [];
       const patterns: Array<[string, RegExp]> = [
@@ -452,6 +457,22 @@ Deno.serve(async (req) => {
       const dre = /"(20\d{2}-[01]\d-[0-3]\d)"/g;
       let dm: RegExpExecArray | null;
       while ((dm = dre.exec(r.body)) !== null) dates.add(dm[1]);
+      // Also try parsing each captured XHR with our real parser, so the
+      // probe response shows whether tryBrowserCalendar would succeed.
+      const xhrSummary = r.network.map((cap) => {
+        let parsedRows = 0;
+        try {
+          const parsed = JSON.parse(cap.body);
+          parsedRows = parseDailyPricingJson(parsed, vehicleId, existing.city ?? null, "xhr").length;
+        } catch { /* ignore */ }
+        return {
+          url: cap.url,
+          status: cap.status,
+          body_len: cap.body.length,
+          parsed_rows: parsedRows,
+          body_sample: cap.body.slice(0, 400),
+        };
+      });
       return new Response(
         JSON.stringify({
           listing_url: existing.listing_url,
@@ -460,6 +481,7 @@ Deno.serve(async (req) => {
           unique_iso_dates_in_body: dates.size,
           first_20_dates: [...dates].sort().slice(0, 20),
           hints,
+          xhr_captured: xhrSummary,
         }, null, 2),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
