@@ -15,6 +15,8 @@ export function ScrapeProgress() {
   const { data: runs } = useQuery({
     queryKey: ["scrape-runs"],
     queryFn: () => ds.runs(),
+    refetchOnMount: "always",
+    staleTime: 0,
     refetchInterval: (q) => {
       const data = q.state.data as Awaited<ReturnType<typeof ds.runs>> | undefined;
       const hasActive = (data ?? []).some(
@@ -22,7 +24,9 @@ export function ScrapeProgress() {
           r.status === "running" &&
           Date.now() - new Date(r.started_at).getTime() < 15 * 60 * 1000,
       );
-      return hasActive ? 5000 : false;
+      // Always poll every 5s — even if no active runs are visible yet, a
+      // freshly-clicked "Save & run" needs a moment for the row to appear.
+      return hasActive ? 5000 : 5000;
     },
   });
 
