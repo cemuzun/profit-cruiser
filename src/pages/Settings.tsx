@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ds, userStore, ALL_VEHICLE_TYPES, type ScrapeFilters } from "@/lib/dataSource";
+import { ds, userStore, ALL_VEHICLE_TYPES, ALL_FUEL_TYPES, type ScrapeFilters } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -48,10 +48,13 @@ export default function Settings() {
       if (!filterForm) return;
       await ds.saveScrapeFilters({
         vehicle_types: filterForm.vehicle_types,
+        fuel_types: filterForm.fuel_types ?? [],
         min_daily_price: filterForm.min_daily_price,
         max_daily_price: filterForm.max_daily_price,
         min_year: filterForm.min_year,
         max_year: filterForm.max_year,
+        min_trips: filterForm.min_trips,
+        min_rating: filterForm.min_rating,
         enabled: filterForm.enabled,
       });
     },
@@ -210,13 +213,38 @@ export default function Settings() {
                   <Field label="Max $/day" value={filterForm.max_daily_price ?? ""} onChange={setNum("max_daily_price")} />
                   <Field label="Min year" value={filterForm.min_year ?? ""} onChange={setNum("min_year")} />
                   <Field label="Max year" value={filterForm.max_year ?? ""} onChange={setNum("max_year")} />
+                  <Field label="Min trips" value={filterForm.min_trips ?? ""} onChange={setNum("min_trips")} hint="Drop listings with fewer completed trips than this. Useful to skip brand-new untested cars." />
+                  <Field label="Min rating" value={filterForm.min_rating ?? ""} onChange={setNum("min_rating")} hint="0–5 scale. Listings below this average rating are dropped." />
+                </div>
+
+                <div>
+                  <Label className="text-sm">Fuel types</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-1.5">
+                    {ALL_FUEL_TYPES.map((f) => (
+                      <label key={f} className="flex items-center gap-2 text-sm border border-border rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/40">
+                        <Checkbox
+                          checked={(filterForm.fuel_types ?? []).includes(f)}
+                          onCheckedChange={() => {
+                            const cur = filterForm.fuel_types ?? [];
+                            const has = cur.includes(f);
+                            setFilterForm({
+                              ...filterForm,
+                              fuel_types: has ? cur.filter(x => x !== f) : [...cur, f],
+                            });
+                          }}
+                        />
+                        <span>{f.toLowerCase()}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">Empty selection = all fuel types. Note: Turo doesn't always expose fuel — listings with unknown fuel pass through.</p>
                 </div>
 
                 <div className="flex gap-2 pt-1">
                   <Button onClick={() => saveFilters.mutate()} disabled={saveFilters.isPending}>Save filters</Button>
                   <Button
                     variant="ghost"
-                    onClick={() => setFilterForm({ vehicle_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, enabled: true })}
+                    onClick={() => setFilterForm({ vehicle_types: [], fuel_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, min_trips: null, min_rating: null, enabled: true })}
                   >
                     Reset
                   </Button>
