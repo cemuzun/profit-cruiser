@@ -1,0 +1,1 @@
+UPDATE public.listings_current SET avg_daily_price = NULL WHERE vehicle_id = '3407985' AND avg_daily_price = 306;
