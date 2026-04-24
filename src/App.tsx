@@ -12,6 +12,7 @@ import Seasonality from "./pages/Seasonality.tsx";
 import Compare from "./pages/Compare.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import Cities from "./pages/Cities.tsx";
+import Admin from "./pages/Admin.tsx";
 
 const queryClient = new QueryClient();
 
