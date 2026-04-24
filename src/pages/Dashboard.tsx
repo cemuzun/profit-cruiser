@@ -22,6 +22,7 @@ import {
 } from "recharts";
 import { format } from "date-fns";
 import { ScrapeProgress } from "@/components/ScrapeProgress";
+import { ScrapeControlPanel } from "@/components/ScrapeControlPanel";
 
 type SortKey = "vehicle" | "city" | "price" | "p7" | "p14" | "p30" | "trips" | "rating" | "profit" | "margin";
 type SortDir = "asc" | "desc";
@@ -228,6 +229,7 @@ export default function Dashboard() {
           </div>
         </div>
 
+        <ScrapeControlPanel />
         <ScrapeProgress />
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
