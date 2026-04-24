@@ -175,37 +175,27 @@ function buildDateRange(days: number): { start: string; end: string; all: string
   return { start: ymd(start), end: ymd(end), all };
 }
 
-// Try Turo's daily_pricing API. Returns per-day rows on success, [] otherwise.
-async function tryDailyPricingApi(
+/** Parse one Turo daily-pricing JSON payload (whatever shape) into DayRows. */
+function parseDailyPricingJson(
+  parsed: unknown,
   vehicleId: string,
   city: string | null,
-  start: string,
-  end: string,
-): Promise<DayRow[]> {
-  const url = `https://turo.com/api/vehicle/daily_pricing/v1?vehicleId=${vehicleId}&start=${start}&end=${end}&country=US`;
-  let res = await zyteFetch(url, { json: true });
-  if (res.status !== 200 || !res.body) {
-    res = await backupProxyFetch(url);
-  }
-  if (res.status !== 200 || !res.body) return [];
-  let parsed: any;
-  try {
-    parsed = JSON.parse(res.body);
-  } catch {
-    return [];
-  }
-  // Endpoint shape varies. Look for arrays of {date, price, available} or
-  // {date, customPrice, status} or nested under .dailyPricingResponses.
+  source: string,
+): DayRow[] {
+  if (!parsed || typeof parsed !== "object") return [];
+  const p = parsed as Record<string, any>;
   const list: any[] =
-    parsed?.dailyPricingResponses ??
-    parsed?.dailyPrices ??
-    parsed?.prices ??
-    (Array.isArray(parsed) ? parsed : []);
+    p.dailyPricingResponses ??
+    p.dailyPrices ??
+    p.prices ??
+    p.dailyPricing ??
+    p.calendar ??
+    (Array.isArray(parsed) ? (parsed as any[]) : []);
   if (!Array.isArray(list) || list.length === 0) return [];
 
   const out: DayRow[] = [];
   for (const item of list) {
-    const day = item?.date ?? item?.day;
+    const day: string | undefined = item?.date ?? item?.day ?? item?.localDate;
     if (!day || typeof day !== "string") continue;
     const price =
       typeof item?.price === "number"
@@ -214,16 +204,18 @@ async function tryDailyPricingApi(
           ? item.customPrice
           : typeof item?.priceWithCurrency?.amount === "number"
             ? item.priceWithCurrency.amount
-            : null;
-    // Availability can come as boolean, status string, or "wholesalePriceWithCurrency" presence.
+            : typeof item?.amount === "number"
+              ? item.amount
+              : null;
     let available: boolean | null = null;
     if (typeof item?.available === "boolean") available = item.available;
     else if (typeof item?.isAvailable === "boolean") available = item.isAvailable;
+    else if (typeof item?.unavailable === "boolean") available = !item.unavailable;
     else if (typeof item?.status === "string") {
       const s = item.status.toUpperCase();
-      if (s.includes("AVAILABLE")) available = true;
-      else if (s.includes("UNAVAILABLE") || s.includes("BOOKED") || s.includes("BLOCKED"))
+      if (s.includes("UNAVAILABLE") || s.includes("BOOKED") || s.includes("BLOCKED"))
         available = false;
+      else if (s === "AVAILABLE" || s.includes("BOOKABLE")) available = true;
     }
     out.push({
       vehicle_id: vehicleId,
@@ -232,52 +224,70 @@ async function tryDailyPricingApi(
       is_available: available,
       daily_price: price,
       currency: "USD",
-      source: "api",
+      source,
     });
   }
   return out;
 }
 
-// HTML fallback: parse listing detail page for blocked/unavailable days.
-// Turo embeds calendar state inside __NEXT_DATA__ or inline JSON. We look for
-// arrays of unavailable date strings in YYYY-MM-DD form.
-async function tryHtmlFallback(
+/**
+ * Capture Turo's calendar XHR by rendering the listing in a headless browser
+ * with Zyte and intercepting the network response. Turo's frontend hits
+ * `/api/vehicle/daily_pricing/v1?vehicleId=…` automatically when the booking
+ * widget mounts, so we wait a few seconds after navigation.
+ *
+ * Returns parsed rows on success, [] otherwise.
+ */
+async function tryBrowserCalendar(
   vehicleId: string,
   city: string | null,
   listingUrl: string | null,
-  allDays: string[],
-): Promise<DayRow[]> {
+): Promise<{ rows: DayRow[]; usedSource: "xhr" | "html" | "none" }> {
   const href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
-  let res = await zyteFetch(href);
-  if (res.status !== 200 || !res.body) {
-    res = await backupProxyFetch(href);
-  }
-  if (!res.body) return [];
+  const r = await zyteFetch(href, {
+    browser: true,
+    captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
+    scrollToSelector: "form",
+    waitSeconds: 6,
+  });
 
-  // Heuristic: collect every YYYY-MM-DD inside an "unavailable"/"booked"/"blocked"
-  // adjacent JSON segment. Scope each match to a small window around the keyword.
-  const unavailable = new Set<string>();
-  const re = /(unavailable|blocked|booked|reservedDates|unavailableDates)[^[{]{0,200}([\s\S]{0,2000})/gi;
+  // Prefer a captured XHR that actually returned 200 + JSON.
+  for (const cap of r.network) {
+    if (cap.status !== 200 || !cap.body) continue;
+    if (!/daily_pricing|calendar|dailyPricing/i.test(cap.url)) continue;
+    let parsed: unknown;
+    try { parsed = JSON.parse(cap.body); } catch { continue; }
+    const rows = parseDailyPricingJson(parsed, vehicleId, city, "xhr");
+    if (rows.length) return { rows, usedSource: "xhr" };
+  }
+
+  // No XHR captured (or all empty): try parsing inline JSON in the rendered HTML.
+  if (r.body) {
+    const inlineRows = parseInlineCalendarFromHtml(r.body, vehicleId, city);
+    if (inlineRows.length) return { rows: inlineRows, usedSource: "html" };
+  }
+  return { rows: [], usedSource: "none" };
+}
+
+/** Look inside the rendered HTML (e.g. __NEXT_DATA__ payload) for a calendar
+ *  array. Used as a no-extra-cost fallback after browser render. */
+function parseInlineCalendarFromHtml(
+  html: string,
+  vehicleId: string,
+  city: string | null,
+): DayRow[] {
+  const re = /"(?:dailyPricingResponses|dailyPrices|dailyPricing)"\s*:\s*(\[[\s\S]{0,200000}?\])/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(res.body)) !== null) {
-    const segment = m[2];
-    const dateRe = /(20\d{2}-[01]\d-[0-3]\d)/g;
-    let dm: RegExpExecArray | null;
-    while ((dm = dateRe.exec(segment)) !== null) {
-      unavailable.add(dm[1]);
+  while ((m = re.exec(html)) !== null) {
+    try {
+      const arr = JSON.parse(m[1]);
+      const rows = parseDailyPricingJson({ dailyPricing: arr }, vehicleId, city, "html");
+      if (rows.length) return rows;
+    } catch {
+      /* keep scanning */
     }
   }
-  if (unavailable.size === 0) return [];
-
-  return allDays.map((day) => ({
-    vehicle_id: vehicleId,
-    city,
-    day,
-    is_available: !unavailable.has(day),
-    daily_price: null,
-    currency: "USD",
-    source: "html",
-  }));
+  return [];
 }
 
 // ---------- Orchestrator ----------
