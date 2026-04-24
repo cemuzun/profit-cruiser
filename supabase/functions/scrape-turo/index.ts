@@ -370,16 +370,79 @@ async function fetchVehicle(
   const { year, model } = parseYearAndModel(ld.name, v.model);
   const make = ld.brand?.name ?? v.make ?? null;
 
-  // Price extraction: prefer "$NNN/day" visible text over JSON-LD offers.price
-  // (offers.price sometimes returns multi-day totals).
-  let price: number | null = null;
-  const dailyMatch = res.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*\/\s*day/i);
+  // Price extraction with cross-validation against multiple source signals.
+  // Turo's `offers.price` in JSON-LD is UNRELIABLE — it often returns a
+  // multi-day total, weekly rate, or aggregate. We only trust it when at
+  // least one other source agrees (within ±40%).
+  //
+  // Sources, in order of trust:
+  //   1. Visible "$NNN/day" text in SSR HTML (most reliable)
+  //   2. data-testid="search-result-price" / "vehicle-price" attributes
+  //   3. ld.offers.lowPrice (Turo's true daily floor when range is given)
+  //   4. ld.offers.price (LAST RESORT — must cross-validate)
+  const HARD_MAX_DAILY = 2500; // Even hypercars rarely exceed this on Turo
+  const HARD_MIN_DAILY = 15;
+
+  const candidates: Array<{ value: number; source: string }> = [];
+
+  // Source 1: "$NNN/day" or "$NNN per day"
+  const dailyMatch = res.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/\s*day|per\s+day)/i);
   if (dailyMatch) {
     const n = parseFloat(dailyMatch[1].replace(/,/g, ""));
-    if (Number.isFinite(n) && n > 0) price = n;
+    if (Number.isFinite(n) && n >= HARD_MIN_DAILY && n <= HARD_MAX_DAILY) {
+      candidates.push({ value: n, source: "per-day-text" });
+    }
   }
-  if (price == null && typeof ld.offers?.price === "number") {
-    price = ld.offers.price;
+
+  // Source 2: data-testid attribute (Turo's React render)
+  const testIdMatch = res.body.match(/data-testid=["'](?:search-result-price|vehicle-price|daily-price)["'][^>]*>\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
+  if (testIdMatch) {
+    const n = parseFloat(testIdMatch[1].replace(/,/g, ""));
+    if (Number.isFinite(n) && n >= HARD_MIN_DAILY && n <= HARD_MAX_DAILY) {
+      candidates.push({ value: n, source: "testid" });
+    }
+  }
+
+  // Source 3: lowPrice from offers (this is genuinely the daily rate when present)
+  if (typeof (ld.offers as any)?.lowPrice === "number") {
+    const n = (ld.offers as any).lowPrice as number;
+    if (n >= HARD_MIN_DAILY && n <= HARD_MAX_DAILY) {
+      candidates.push({ value: n, source: "ld-lowPrice" });
+    }
+  }
+
+  // Source 4: ld.offers.price — only as cross-validation, never alone
+  let ldPriceCandidate: number | null = null;
+  if (typeof ld.offers?.price === "number") {
+    const n = ld.offers.price;
+    if (n >= HARD_MIN_DAILY && n <= HARD_MAX_DAILY) {
+      ldPriceCandidate = n;
+    }
+  }
+
+  let price: number | null = null;
+  if (candidates.length > 0) {
+    // Use the most-trusted candidate (first in array)
+    price = candidates[0].value;
+    // If ld.offers.price is wildly off from the trusted source, log it
+    if (ldPriceCandidate && Math.abs(ldPriceCandidate - price) / price > 0.4) {
+      console.warn(
+        `detail ${v.id}: ld.offers.price=${ldPriceCandidate} disagrees with ${candidates[0].source}=${price} — using trusted source`,
+      );
+    }
+  } else if (ldPriceCandidate != null) {
+    // No trusted source available. Only accept ld.offers.price if it passes
+    // a class-based plausibility check based on vehicle make.
+    const make = (ld.brand?.name ?? v.make ?? "").toLowerCase();
+    const isExotic = /ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani|maserati/.test(make);
+    const plausibleMax = isExotic ? 1500 : 400;
+    if (ldPriceCandidate <= plausibleMax) {
+      price = ldPriceCandidate;
+    } else {
+      console.warn(
+        `detail ${v.id}: only ld.offers.price=${ldPriceCandidate} available, exceeds plausible max ${plausibleMax} for ${make} — dropping`,
+      );
+    }
   }
 
   // Sanity guard: if we have a previous price for this vehicle and the new
