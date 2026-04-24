@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ds, userStore } from "@/lib/dataSource";
+import { ds, userStore, ALL_VEHICLE_TYPES, type ScrapeFilters } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { DEFAULT_GLOBAL, type GlobalCosts, type AcquisitionMode } from "@/lib/profitability";
 import { Info } from "lucide-react";
