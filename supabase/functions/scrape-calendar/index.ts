@@ -316,26 +316,28 @@ async function runCalendarScrape(opts: {
     const list = vehicles ?? [];
     if (!list.length) throw new Error("no vehicles to scrape");
 
-    const { start, end, all } = buildDateRange(WINDOW_DAYS);
+    // Trim returned rows to the next 90 days only — Turo's payload sometimes
+    // returns a longer window than we want to store.
+    const { all } = buildDateRange(WINDOW_DAYS);
+    const validDays = new Set(all);
 
     let okCount = 0;
     let failCount = 0;
-    let apiCount = 0;
+    let xhrCount = 0;
     let htmlCount = 0;
 
-    const CONCURRENCY = 4;
+    // Browser-rendered Zyte requests are slow + expensive. Keep concurrency low
+    // so we don't burn through the Zyte rate limit on a 1k-vehicle batch.
+    const CONCURRENCY = 3;
     let i = 0;
     async function worker() {
       while (i < list.length) {
         const idx = i++;
         const v = list[idx] as { vehicle_id: string; city: string | null; listing_url: string | null };
         try {
-          let rows = await tryDailyPricingApi(v.vehicle_id, v.city, start, end);
-          let usedSource = "api";
-          if (rows.length === 0) {
-            rows = await tryHtmlFallback(v.vehicle_id, v.city, v.listing_url, all);
-            usedSource = "html";
-          }
+          const { rows: rawRows, usedSource } =
+            await tryBrowserCalendar(v.vehicle_id, v.city, v.listing_url);
+          const rows = rawRows.filter((r) => validDays.has(r.day));
           if (rows.length === 0) {
             failCount++;
             continue;
@@ -350,8 +352,8 @@ async function runCalendarScrape(opts: {
             continue;
           }
           okCount++;
-          if (usedSource === "api") apiCount++;
-          else htmlCount++;
+          if (usedSource === "xhr") xhrCount++;
+          else if (usedSource === "html") htmlCount++;
         } catch (e) {
           console.warn(`vehicle ${v.vehicle_id} error:`, e);
           failCount++;
