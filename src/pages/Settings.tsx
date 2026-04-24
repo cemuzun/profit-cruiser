@@ -36,6 +36,46 @@ export default function Settings() {
     queryFn: async () => ds.runs(),
   });
 
+  const { data: filters } = useQuery({
+    queryKey: ["scrape-filters"],
+    queryFn: async () => ds.scrapeFilters(),
+  });
+  const [filterForm, setFilterForm] = useState<ScrapeFilters | null>(null);
+  useEffect(() => { if (filters) setFilterForm(filters); }, [filters]);
+
+  const saveFilters = useMutation({
+    mutationFn: async () => {
+      if (!filterForm) return;
+      await ds.saveScrapeFilters({
+        vehicle_types: filterForm.vehicle_types,
+        min_daily_price: filterForm.min_daily_price,
+        max_daily_price: filterForm.max_daily_price,
+        min_year: filterForm.min_year,
+        max_year: filterForm.max_year,
+        enabled: filterForm.enabled,
+      });
+    },
+    onSuccess: () => {
+      toast.success("Scrape filters saved");
+      qc.invalidateQueries({ queryKey: ["scrape-filters"] });
+    },
+    onError: (e: any) => toast.error(e?.message ?? "Failed to save filters"),
+  });
+
+  const toggleType = (t: string) => {
+    if (!filterForm) return;
+    const has = filterForm.vehicle_types.includes(t);
+    setFilterForm({
+      ...filterForm,
+      vehicle_types: has ? filterForm.vehicle_types.filter(x => x !== t) : [...filterForm.vehicle_types, t],
+    });
+  };
+  const setNum = (k: keyof ScrapeFilters) => (e: any) => {
+    if (!filterForm) return;
+    const raw = e.target.value;
+    setFilterForm({ ...filterForm, [k]: raw === "" ? null : Number(raw) } as ScrapeFilters);
+  };
+
   const set = (k: keyof GlobalCosts) => (e: any) => {
     const raw = e.target.value;
     setForm({ ...form, [k]: raw === "" ? (null as any) : Number(raw) });
