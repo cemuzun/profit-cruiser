@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ds, userStore } from "@/lib/dataSource";
+import { ds, userStore, ALL_VEHICLE_TYPES, type ScrapeFilters } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { DEFAULT_GLOBAL, type GlobalCosts, type AcquisitionMode } from "@/lib/profitability";
 import { Info } from "lucide-react";
@@ -33,6 +35,46 @@ export default function Settings() {
     queryKey: ["scrape-runs"],
     queryFn: async () => ds.runs(),
   });
+
+  const { data: filters } = useQuery({
+    queryKey: ["scrape-filters"],
+    queryFn: async () => ds.scrapeFilters(),
+  });
+  const [filterForm, setFilterForm] = useState<ScrapeFilters | null>(null);
+  useEffect(() => { if (filters) setFilterForm(filters); }, [filters]);
+
+  const saveFilters = useMutation({
+    mutationFn: async () => {
+      if (!filterForm) return;
+      await ds.saveScrapeFilters({
+        vehicle_types: filterForm.vehicle_types,
+        min_daily_price: filterForm.min_daily_price,
+        max_daily_price: filterForm.max_daily_price,
+        min_year: filterForm.min_year,
+        max_year: filterForm.max_year,
+        enabled: filterForm.enabled,
+      });
+    },
+    onSuccess: () => {
+      toast.success("Scrape filters saved");
+      qc.invalidateQueries({ queryKey: ["scrape-filters"] });
+    },
+    onError: (e: any) => toast.error(e?.message ?? "Failed to save filters"),
+  });
+
+  const toggleType = (t: string) => {
+    if (!filterForm) return;
+    const has = filterForm.vehicle_types.includes(t);
+    setFilterForm({
+      ...filterForm,
+      vehicle_types: has ? filterForm.vehicle_types.filter(x => x !== t) : [...filterForm.vehicle_types, t],
+    });
+  };
+  const setNum = (k: keyof ScrapeFilters) => (e: any) => {
+    if (!filterForm) return;
+    const raw = e.target.value;
+    setFilterForm({ ...filterForm, [k]: raw === "" ? null : Number(raw) } as ScrapeFilters);
+  };
 
   const set = (k: keyof GlobalCosts) => (e: any) => {
     const raw = e.target.value;
@@ -123,6 +165,64 @@ export default function Settings() {
               <Button onClick={() => save.mutate()} disabled={save.isPending}>Save</Button>
               <Button variant="ghost" onClick={() => setForm(DEFAULT_GLOBAL)}>Reset to defaults</Button>
             </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold">Scrape filters</h2>
+              {filterForm && (
+                <div className="flex items-center gap-2">
+                  <Label htmlFor="scrape-filters-enabled" className="text-xs text-muted-foreground">Enabled</Label>
+                  <Switch
+                    id="scrape-filters-enabled"
+                    checked={filterForm.enabled}
+                    onCheckedChange={(v) => setFilterForm({ ...filterForm, enabled: v })}
+                  />
+                </div>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Limit which listings the scraper fetches. Categories you uncheck are skipped entirely. Price/year ranges narrow discovery and drop out-of-range vehicles before they're saved. Leave a field blank for no limit.
+            </p>
+
+            {filterForm && (
+              <>
+                <div>
+                  <Label className="text-sm">Vehicle types</Label>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-1.5">
+                    {ALL_VEHICLE_TYPES.map((t) => (
+                      <label key={t} className="flex items-center gap-2 text-sm border border-border rounded-md px-2 py-1.5 cursor-pointer hover:bg-muted/40">
+                        <Checkbox
+                          checked={filterForm.vehicle_types.includes(t)}
+                          onCheckedChange={() => toggleType(t)}
+                        />
+                        <span>{t.replace(/-rental$/, "").replace(/-/g, " ")}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1">Empty selection = all types.</p>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Field label="Min $/day" value={filterForm.min_daily_price ?? ""} onChange={setNum("min_daily_price")} />
+                  <Field label="Max $/day" value={filterForm.max_daily_price ?? ""} onChange={setNum("max_daily_price")} />
+                  <Field label="Min year" value={filterForm.min_year ?? ""} onChange={setNum("min_year")} />
+                  <Field label="Max year" value={filterForm.max_year ?? ""} onChange={setNum("max_year")} />
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <Button onClick={() => saveFilters.mutate()} disabled={saveFilters.isPending}>Save filters</Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => setFilterForm({ vehicle_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, enabled: true })}
+                  >
+                    Reset
+                  </Button>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
 

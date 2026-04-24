@@ -410,6 +410,39 @@ export type Database = {
         }
         Relationships: []
       }
+      scrape_filters: {
+        Row: {
+          enabled: boolean
+          id: number
+          max_daily_price: number | null
+          max_year: number | null
+          min_daily_price: number | null
+          min_year: number | null
+          updated_at: string
+          vehicle_types: string[]
+        }
+        Insert: {
+          enabled?: boolean
+          id?: number
+          max_daily_price?: number | null
+          max_year?: number | null
+          min_daily_price?: number | null
+          min_year?: number | null
+          updated_at?: string
+          vehicle_types?: string[]
+        }
+        Update: {
+          enabled?: boolean
+          id?: number
+          max_daily_price?: number | null
+          max_year?: number | null
+          min_daily_price?: number | null
+          min_year?: number | null
+          updated_at?: string
+          vehicle_types?: string[]
+        }
+        Relationships: []
+      }
       scrape_runs: {
         Row: {
           city: string
