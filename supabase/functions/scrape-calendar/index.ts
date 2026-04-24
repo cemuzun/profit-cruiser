@@ -34,34 +34,35 @@ const WINDOW_DAYS = 90;
 // ---------- Fetch helpers ----------
 async function zyteFetch(
   url: string,
-  opts: { json?: boolean } = {},
+  opts: { json?: boolean; browser?: boolean } = {},
 ): Promise<{ status: number; body: string }> {
+  const reqBody: Record<string, unknown> = { url, geolocation: "US" };
+  if (opts.browser) {
+    // Browser-rendered. Required for Turo's listing pages because the
+    // calendar/availability data is hydrated via authenticated XHR after
+    // first paint and is not present in the SSR HTML. ~10x cost vs basic.
+    reqBody.browserHtml = true;
+  } else {
+    reqBody.httpResponseBody = true;
+    if (opts.json) {
+      reqBody.customHttpRequestHeaders = [
+        { name: "Accept", value: "application/json" },
+        { name: "User-Agent", value: "Mozilla/5.0" },
+      ];
+    }
+  }
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
       Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      url,
-      geolocation: "US",
-      httpResponseBody: true,
-      // Some Turo API endpoints require these headers to return JSON.
-      ...(opts.json
-        ? {
-            customHttpRequestHeaders: [
-              { name: "Accept", value: "application/json" },
-              { name: "User-Agent", value: "Mozilla/5.0" },
-            ],
-          }
-        : {}),
-    }),
+    body: JSON.stringify(reqBody),
   });
-  if (!res.ok) {
-    return { status: res.status, body: "" };
-  }
+  if (!res.ok) return { status: res.status, body: "" };
   const data = await res.json();
   const status = data.statusCode ?? 0;
+  if (data.browserHtml) return { status, body: data.browserHtml as string };
   const raw = data.httpResponseBody as string | undefined;
   if (!raw) return { status, body: "" };
   const bin = atob(raw);
@@ -339,46 +340,55 @@ Deno.serve(async (req) => {
     const background = !!body?.background;
     const probe = !!body?.probe;
 
-    // Probe mode: try several candidate calendar endpoints + dump previews so
-    // we can confirm the real shape Turo returns. Used to bootstrap the parser.
+    // Probe mode: browser-render the canonical listing URL and dump every JSON
+    // segment that smells like calendar/availability data. Used to bootstrap
+    // the parser against Turo's hydrated state.
     if (probe && vehicleId) {
-      const { start, end } = buildDateRange(WINDOW_DAYS);
-      const candidates = [
-        `https://turo.com/api/vehicle/daily_pricing/v1?vehicleId=${vehicleId}&start=${start}&end=${end}&country=US`,
-        `https://turo.com/api/vehicle/daily_pricing?vehicleId=${vehicleId}&start=${start}&end=${end}`,
-        `https://turo.com/api/vehicle_search/${vehicleId}/daily_pricing?startDate=${start}&endDate=${end}`,
-        `https://turo.com/api/vehicle/${vehicleId}/daily_pricing?start=${start}&end=${end}`,
-        `https://turo.com/api/vehicle/${vehicleId}/calendar?startDate=${start}&endDate=${end}`,
-        `https://turo.com/api/v2/vehicles/${vehicleId}/daily_pricing?start=${start}&end=${end}`,
+      const { data: existing } = await supabase
+        .from("listings_current")
+        .select("vehicle_id, city, listing_url")
+        .eq("vehicle_id", vehicleId)
+        .single();
+      if (!existing?.listing_url) {
+        return new Response(
+          JSON.stringify({ error: `no listing_url for vehicle ${vehicleId}` }),
+          { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      const r = await zyteFetch(existing.listing_url, { browser: true });
+      // Look for hot patterns near "unavailable" / date arrays / per-day price.
+      const hints: Array<{ tag: string; sample: string }> = [];
+      const patterns: Array<[string, RegExp]> = [
+        ["unavailableDates", /unavailableDates[^]{0,1500}/gi],
+        ["dailyPricing", /dailyPricing[^]{0,1500}/gi],
+        ["dailyPrices", /dailyPrices[^]{0,1500}/gi],
+        ["calendar", /"calendar"[^]{0,1500}/gi],
+        ["availability", /"availability"[^]{0,1500}/gi],
+        ["bookedDates", /bookedDates[^]{0,1500}/gi],
+        ["dateRange", /dateRange[^]{0,1000}/gi],
+        ["pricePerDay", /pricePerDay[^]{0,800}/gi],
+        ["nextData", /__NEXT_DATA__[^]{0,2000}/gi],
+        ["dateString", /"20\d{2}-[01]\d-[0-3]\d"[^]{0,400}/g],
       ];
-      const results: any[] = [];
-      for (const u of candidates) {
-        let r = await zyteFetch(u, { json: true });
-        if (r.status !== 200) {
-          const b = await backupProxyFetch(u);
-          if (b.status === 200) r = b;
-        }
-        results.push({
-          url: u,
-          status: r.status,
-          length: r.body.length,
-          preview: r.body.slice(0, 800),
-        });
+      for (const [tag, re] of patterns) {
+        re.lastIndex = 0;
+        const m = re.exec(r.body);
+        if (m) hints.push({ tag, sample: m[0].slice(0, 600) });
       }
-      // Also dump the listing detail page for HTML calendar reverse-engineering.
-      const detailUrl = `https://turo.com/us/en/car-details/${vehicleId}`;
-      const detail = await zyteFetch(detailUrl);
-      const calendarHints: string[] = [];
-      const re =
-        /(unavailable|blocked|booked|reservedDates|unavailableDates|calendar|availability)[\s\S]{0,300}/gi;
-      let m: RegExpExecArray | null;
-      let count = 0;
-      while ((m = re.exec(detail.body)) !== null && count < 8) {
-        calendarHints.push(m[0].slice(0, 250));
-        count++;
-      }
+      // Count distinct YYYY-MM-DD occurrences as a sanity signal.
+      const dates = new Set<string>();
+      const dre = /"(20\d{2}-[01]\d-[0-3]\d)"/g;
+      let dm: RegExpExecArray | null;
+      while ((dm = dre.exec(r.body)) !== null) dates.add(dm[1]);
       return new Response(
-        JSON.stringify({ candidates: results, detail_status: detail.status, detail_len: detail.body.length, calendar_hints: calendarHints }, null, 2),
+        JSON.stringify({
+          listing_url: existing.listing_url,
+          status: r.status,
+          html_len: r.body.length,
+          unique_iso_dates_in_body: dates.size,
+          first_20_dates: [...dates].sort().slice(0, 20),
+          hints,
+        }, null, 2),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
