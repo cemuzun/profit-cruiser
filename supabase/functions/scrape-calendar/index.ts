@@ -211,6 +211,9 @@ function parseDailyPricingJson(
     if (typeof item?.available === "boolean") available = item.available;
     else if (typeof item?.isAvailable === "boolean") available = item.isAvailable;
     else if (typeof item?.unavailable === "boolean") available = !item.unavailable;
+    else if (typeof item?.wholeDayUnavailable === "boolean")
+      // Turo's daily_pricing endpoint marks blocked days as wholeDayUnavailable.
+      available = !item.wholeDayUnavailable;
     else if (typeof item?.status === "string") {
       const s = item.status.toUpperCase();
       if (s.includes("UNAVAILABLE") || s.includes("BOOKED") || s.includes("BLOCKED"))
