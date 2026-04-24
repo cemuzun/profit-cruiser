@@ -547,6 +547,27 @@ async function runScrape(citySlug: string) {
       .single();
     if (cErr || !city) throw new Error(`Unknown city ${citySlug}`);
 
+    // Load active scrape filters (singleton row, id=1).
+    const { data: filtRow } = await supabase
+      .from("scrape_filters")
+      .select("*")
+      .eq("id", 1)
+      .maybeSingle();
+    const filters = filtRow && filtRow.enabled
+      ? {
+          vehicle_types: (filtRow.vehicle_types ?? []) as string[],
+          min_daily_price: filtRow.min_daily_price != null ? Number(filtRow.min_daily_price) : null,
+          max_daily_price: filtRow.max_daily_price != null ? Number(filtRow.max_daily_price) : null,
+          min_year: filtRow.min_year != null ? Number(filtRow.min_year) : null,
+          max_year: filtRow.max_year != null ? Number(filtRow.max_year) : null,
+        }
+      : null;
+    if (filters) {
+      console.log(
+        `Scrape filters active: types=${filters.vehicle_types.length || "all"} price=[${filters.min_daily_price ?? "-"},${filters.max_daily_price ?? "-"}] year=[${filters.min_year ?? "-"},${filters.max_year ?? "-"}]`,
+      );
+    }
+
     const urlSlug = cityUrlSlug({ name: city.name, region: city.region });
     console.log(`Discovering vehicles for ${citySlug} (urlSlug=${urlSlug})`);
     const found = await discoverVehicleIds(
@@ -558,6 +579,7 @@ async function runScrape(citySlug: string) {
         place_id: city.place_id,
       },
       urlSlug,
+      filters,
     );
     console.log(`Discovered ${found.length} unique vehicle URLs`);
 
@@ -578,7 +600,15 @@ async function runScrape(citySlug: string) {
         const v = found[idx];
         try {
           const row = await fetchVehicle(v, citySlug);
-          if (row) vehicles.push(row);
+          if (!row) continue;
+          // Apply post-fetch filters: drop vehicles outside year or price range.
+          if (filters) {
+            if (filters.min_year != null && row.year != null && row.year < filters.min_year) continue;
+            if (filters.max_year != null && row.year != null && row.year > filters.max_year) continue;
+            if (filters.min_daily_price != null && row.avg_daily_price != null && row.avg_daily_price < filters.min_daily_price) continue;
+            if (filters.max_daily_price != null && row.avg_daily_price != null && row.avg_daily_price > filters.max_daily_price) continue;
+          }
+          vehicles.push(row);
         } catch (e) {
           console.warn(`vehicle ${v.id} error:`, e);
         }
