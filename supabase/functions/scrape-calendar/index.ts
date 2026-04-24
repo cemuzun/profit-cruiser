@@ -254,9 +254,10 @@ async function tryBrowserCalendar(
     waitSeconds: 6,
   });
 
-  // Prefer a captured XHR that actually returned 200 + JSON.
+  // Prefer a captured XHR that returned a JSON body. (Zyte's networkCapture
+  // sometimes reports status 0 even on 200 — gate on body shape instead.)
   for (const cap of r.network) {
-    if (cap.status !== 200 || !cap.body) continue;
+    if (!cap.body || cap.body[0] !== "{") continue;
     if (!/daily_pricing|calendar|dailyPricing/i.test(cap.url)) continue;
     let parsed: unknown;
     try { parsed = JSON.parse(cap.body); } catch { continue; }
