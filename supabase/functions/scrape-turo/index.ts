@@ -343,13 +343,13 @@ async function fetchVehicle(
   let res = await zyteText(v.href);
   let source = "zyte";
 
-  // If Zyte got a non-200 OR a Cloudflare challenge page, try Firecrawl.
+  // If Zyte got a non-200 OR a Cloudflare challenge page, try backup proxy.
   if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
-    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying firecrawl`);
-    const fc = await firecrawlText(v.href);
-    if (fc.body && !isBlockedPage(fc.body) && extractLdProduct(fc.body)) {
-      res = fc;
-      source = "firecrawl";
+    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
+    const bp = await backupProxyText(v.href);
+    if (bp.body && !isBlockedPage(bp.body) && extractLdProduct(bp.body)) {
+      res = bp;
+      source = "backup_proxy";
     }
   }
 
