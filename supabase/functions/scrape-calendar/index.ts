@@ -337,6 +337,51 @@ Deno.serve(async (req) => {
     const vehicleId = body?.vehicleId ? String(body.vehicleId) : undefined;
     const limit = body?.limit ? Number(body.limit) : undefined;
     const background = !!body?.background;
+    const probe = !!body?.probe;
+
+    // Probe mode: try several candidate calendar endpoints + dump previews so
+    // we can confirm the real shape Turo returns. Used to bootstrap the parser.
+    if (probe && vehicleId) {
+      const { start, end } = buildDateRange(WINDOW_DAYS);
+      const candidates = [
+        `https://turo.com/api/vehicle/daily_pricing/v1?vehicleId=${vehicleId}&start=${start}&end=${end}&country=US`,
+        `https://turo.com/api/vehicle/daily_pricing?vehicleId=${vehicleId}&start=${start}&end=${end}`,
+        `https://turo.com/api/vehicle_search/${vehicleId}/daily_pricing?startDate=${start}&endDate=${end}`,
+        `https://turo.com/api/vehicle/${vehicleId}/daily_pricing?start=${start}&end=${end}`,
+        `https://turo.com/api/vehicle/${vehicleId}/calendar?startDate=${start}&endDate=${end}`,
+        `https://turo.com/api/v2/vehicles/${vehicleId}/daily_pricing?start=${start}&end=${end}`,
+      ];
+      const results: any[] = [];
+      for (const u of candidates) {
+        let r = await zyteFetch(u, { json: true });
+        if (r.status !== 200) {
+          const b = await backupProxyFetch(u);
+          if (b.status === 200) r = b;
+        }
+        results.push({
+          url: u,
+          status: r.status,
+          length: r.body.length,
+          preview: r.body.slice(0, 800),
+        });
+      }
+      // Also dump the listing detail page for HTML calendar reverse-engineering.
+      const detailUrl = `https://turo.com/us/en/car-details/${vehicleId}`;
+      const detail = await zyteFetch(detailUrl);
+      const calendarHints: string[] = [];
+      const re =
+        /(unavailable|blocked|booked|reservedDates|unavailableDates|calendar|availability)[\s\S]{0,300}/gi;
+      let m: RegExpExecArray | null;
+      let count = 0;
+      while ((m = re.exec(detail.body)) !== null && count < 8) {
+        calendarHints.push(m[0].slice(0, 250));
+        count++;
+      }
+      return new Response(
+        JSON.stringify({ candidates: results, detail_status: detail.status, detail_len: detail.body.length, calendar_hints: calendarHints }, null, 2),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     if (background) {
       // @ts-ignore EdgeRuntime is provided by Supabase runtime
