@@ -460,16 +460,29 @@ async function fetchVehicle(
   // Example: Lamborghini Urus parsed at $306/day is almost certainly a
   // promo/deposit/wrong-element parse, not a real daily rate.
   if (price != null) {
-    const make = (ld.brand?.name ?? v.make ?? "").toLowerCase();
+    const makeLc = (ld.brand?.name ?? v.make ?? "").toLowerCase();
     const minFloor = (() => {
-      if (/ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani/.test(make)) return 500;
-      if (/maserati|porsche|lucid|mercedes.*amg|bmw.*m[0-9]|audi.*r[s8]/.test(make)) return 150;
+      if (/ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani/.test(makeLc)) return 500;
+      if (/maserati|porsche|lucid|mercedes.*amg|bmw.*m[0-9]|audi.*r[s8]/.test(makeLc)) return 150;
       return 0;
     })();
     if (price < minFloor) {
       console.warn(
-        `detail ${v.id}: price ${price} below class min ${minFloor} for ${make} — dropping`,
+        `detail ${v.id}: price ${price} below class min ${minFloor} for ${makeLc} — dropping`,
       );
+      await supabase.from("price_anomalies").insert({
+        vehicle_id: v.id,
+        city: citySlug,
+        make: String(make ?? ""),
+        model: model ?? null,
+        year,
+        attempted_price: price,
+        previous_price: null,
+        kept_price: null,
+        reason: `below_class_min (floor=${minFloor})`,
+        source,
+        listing_url: v.href,
+      });
       price = null;
     }
   }
@@ -489,6 +502,19 @@ async function fetchVehicle(
         console.warn(
           `detail ${v.id}: price ${price} differs >3x from prev ${prevPrice} (source=${source}) — dropping new price`,
         );
+        await supabase.from("price_anomalies").insert({
+          vehicle_id: v.id,
+          city: citySlug,
+          make: String(make ?? ""),
+          model: model ?? null,
+          year,
+          attempted_price: price,
+          previous_price: prevPrice,
+          kept_price: prevPrice,
+          reason: `change_guard_3x (ratio=${ratio.toFixed(2)})`,
+          source,
+          listing_url: v.href,
+        });
         price = null;
       }
     }
