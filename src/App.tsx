@@ -31,6 +31,7 @@ const App = () => (
           <Route path="/compare" element={<Compare />} />
           <Route path="/seasonality" element={<Seasonality />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/admin" element={<Admin />} />
           
           <Route path="*" element={<NotFound />} />
         </Routes>
