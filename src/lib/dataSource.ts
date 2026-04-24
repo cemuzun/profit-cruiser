@@ -155,12 +155,57 @@ async function fetchCities(): Promise<City[]> {
   return (data ?? []) as City[];
 }
 
+export type ScrapeFilters = {
+  vehicle_types: string[];
+  min_daily_price: number | null;
+  max_daily_price: number | null;
+  min_year: number | null;
+  max_year: number | null;
+  enabled: boolean;
+  updated_at?: string;
+};
+
+export const ALL_VEHICLE_TYPES = [
+  "car-rental",
+  "suv-rental",
+  "truck-rental",
+  "minivan-rental",
+  "van-rental",
+  "sports-rental",
+  "exotic-luxury-rental",
+  "convertible-rental",
+  "electric-vehicle-rental",
+] as const;
+
+async function fetchScrapeFilters(): Promise<ScrapeFilters> {
+  const { data, error } = await supabase
+    .from("scrape_filters")
+    .select("*")
+    .eq("id", 1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    return { vehicle_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, enabled: true };
+  }
+  return data as ScrapeFilters;
+}
+
+async function saveScrapeFilters(f: Omit<ScrapeFilters, "updated_at">) {
+  const { error } = await supabase
+    .from("scrape_filters")
+    .update({ ...f, updated_at: new Date().toISOString() })
+    .eq("id", 1);
+  if (error) throw error;
+}
+
 export const ds = {
   listings: () => fetchAllListings(),
   snapshots: () => fetchSnapshots(),
   forecasts: () => fetchForecasts(),
   runs: () => fetchRuns(),
   cities: () => fetchCities(),
+  scrapeFilters: () => fetchScrapeFilters(),
+  saveScrapeFilters,
 
   async addCity(city: Omit<City, "active"> & { active?: boolean }) {
     const { error } = await supabase.from("cities").insert({
