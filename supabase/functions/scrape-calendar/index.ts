@@ -32,16 +32,53 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 const WINDOW_DAYS = 90;
 
 // ---------- Fetch helpers ----------
+type ZyteResult = {
+  status: number;
+  body: string;
+  /** XHRs intercepted by Zyte's networkCapture, decoded to text. */
+  network: Array<{ url: string; status: number; body: string }>;
+};
+
 async function zyteFetch(
   url: string,
-  opts: { json?: boolean; browser?: boolean } = {},
-): Promise<{ status: number; body: string }> {
+  opts: {
+    json?: boolean;
+    /** Render in a headless browser. ~10x cost vs basic. */
+    browser?: boolean;
+    /** Substrings to capture from the rendered page's network traffic.
+     *  Each match returns the response body. Required for Turo calendar
+     *  data, which is hydrated via XHR after first paint. */
+    captureUrls?: string[];
+    /** Extra wait (s) after navigation, to give XHRs time to fire. */
+    waitSeconds?: number;
+    /** CSS selector for an element to scroll into view to trigger lazy XHRs.
+     *  Turo only fetches calendar data when the booking widget is visible. */
+    scrollToSelector?: string;
+  } = {},
+): Promise<ZyteResult> {
   const reqBody: Record<string, unknown> = { url, geolocation: "US" };
   if (opts.browser) {
-    // Browser-rendered. Required for Turo's listing pages because the
-    // calendar/availability data is hydrated via authenticated XHR after
-    // first paint and is not present in the SSR HTML. ~10x cost vs basic.
     reqBody.browserHtml = true;
+    if (opts.captureUrls?.length) {
+      reqBody.networkCapture = opts.captureUrls.map((sub) => ({
+        filterType: "url",
+        value: sub,
+        matchType: "contains",
+        httpResponseBody: true,
+      }));
+    }
+    const actions: Array<Record<string, unknown>> = [];
+    if (opts.scrollToSelector) {
+      actions.push({
+        action: "scrollBottom",
+        maxScrollCount: 3,
+        maxScrollDelay: 0.5,
+      });
+    }
+    if (opts.waitSeconds) {
+      actions.push({ action: "waitForTimeout", timeout: opts.waitSeconds });
+    }
+    if (actions.length) reqBody.actions = actions;
   } else {
     reqBody.httpResponseBody = true;
     if (opts.json) {
@@ -51,6 +88,7 @@ async function zyteFetch(
       ];
     }
   }
+
   const res = await fetch("https://api.zyte.com/v1/extract", {
     method: "POST",
     headers: {
@@ -59,16 +97,38 @@ async function zyteFetch(
     },
     body: JSON.stringify(reqBody),
   });
-  if (!res.ok) return { status: res.status, body: "" };
+  if (!res.ok) return { status: res.status, body: "", network: [] };
   const data = await res.json();
   const status = data.statusCode ?? 0;
-  if (data.browserHtml) return { status, body: data.browserHtml as string };
+
+  // Decode networkCapture entries (base64-encoded response bodies).
+  const network: ZyteResult["network"] = [];
+  const captured = (data.networkCapture ?? []) as Array<any>;
+  for (const cap of captured) {
+    const respUrl = cap?.httpResponseUrl ?? cap?.url ?? "";
+    const respStatus = cap?.httpResponseStatus ?? 0;
+    const raw = cap?.httpResponseBody as string | undefined;
+    if (!raw) {
+      network.push({ url: respUrl, status: respStatus, body: "" });
+      continue;
+    }
+    try {
+      const bin = atob(raw);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      network.push({ url: respUrl, status: respStatus, body: new TextDecoder().decode(bytes) });
+    } catch {
+      network.push({ url: respUrl, status: respStatus, body: "" });
+    }
+  }
+
+  if (data.browserHtml) return { status, body: data.browserHtml as string, network };
   const raw = data.httpResponseBody as string | undefined;
-  if (!raw) return { status, body: "" };
+  if (!raw) return { status, body: "", network };
   const bin = atob(raw);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return { status, body: new TextDecoder().decode(bytes) };
+  return { status, body: new TextDecoder().decode(bytes), network };
 }
 
 async function backupProxyFetch(url: string): Promise<{ status: number; body: string }> {
