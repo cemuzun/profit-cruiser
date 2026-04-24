@@ -333,22 +333,38 @@ async function fetchVehicle(
   v: { id: string; href: string; make: string; model: string; type: string },
   citySlug: string,
 ) {
-  const res = await zyteText(v.href);
-  if (res.status !== 200) {
-    console.warn(`detail ${v.id}: status ${res.status}`);
+  let res = await zyteText(v.href);
+  let source = "zyte";
+
+  // If Zyte got a non-200 OR a Cloudflare challenge page, try Firecrawl.
+  if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
+    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying firecrawl`);
+    const fc = await firecrawlText(v.href);
+    if (fc.body && !isBlockedPage(fc.body) && extractLdProduct(fc.body)) {
+      res = fc;
+      source = "firecrawl";
+    }
+  }
+
+  if (res.status !== 200 && source === "zyte") {
+    console.warn(`detail ${v.id}: status ${res.status}, no fallback succeeded`);
     return null;
   }
+  if (isBlockedPage(res.body)) {
+    console.warn(`detail ${v.id}: blocked page from both providers — skipping`);
+    return null;
+  }
+
   const ld = extractLdProduct(res.body);
   if (!ld) {
-    console.warn(`detail ${v.id}: no JSON-LD Product`);
+    console.warn(`detail ${v.id}: no JSON-LD Product (source=${source})`);
     return null;
   }
   const { year, model } = parseYearAndModel(ld.name, v.model);
   const make = ld.brand?.name ?? v.make ?? null;
-  // Prefer the explicit "$NNN/day" value from the meta description / page text.
-  // Turo's JSON-LD offers.price is unreliable: it varies with the page's default
-  // trip dates and sometimes returns a multi-day total instead of the daily rate
-  // (e.g. a Lamborghini Urus showing $312/day was stored as $1,760 from offers.price).
+
+  // Price extraction: prefer "$NNN/day" visible text over JSON-LD offers.price
+  // (offers.price sometimes returns multi-day totals).
   let price: number | null = null;
   const dailyMatch = res.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*\/\s*day/i);
   if (dailyMatch) {
@@ -358,12 +374,33 @@ async function fetchVehicle(
   if (price == null && typeof ld.offers?.price === "number") {
     price = ld.offers.price;
   }
+
+  // Sanity guard: if we have a previous price for this vehicle and the new
+  // value differs by more than 5x in either direction, treat it as a parse
+  // error and DROP the price (keep the row, but don't overwrite the good one).
+  if (price != null) {
+    const { data: prev } = await supabase
+      .from("listings_current")
+      .select("avg_daily_price")
+      .eq("vehicle_id", v.id)
+      .maybeSingle();
+    const prevPrice = prev?.avg_daily_price ? Number(prev.avg_daily_price) : null;
+    if (prevPrice && prevPrice > 0) {
+      const ratio = price / prevPrice;
+      if (ratio > 5 || ratio < 0.2) {
+        console.warn(
+          `detail ${v.id}: price ${price} differs >5x from prev ${prevPrice} (source=${source}) — dropping new price`,
+        );
+        price = null;
+      }
+    }
+  }
+
   const currency = ld.offers?.priceCurrency ?? "USD";
   const rating = typeof ld.aggregateRating?.ratingValue === "number" ? ld.aggregateRating.ratingValue : null;
   const trips = typeof ld.aggregateRating?.ratingCount === "number" ? ld.aggregateRating.ratingCount : null;
   const image = Array.isArray(ld.image) ? ld.image[0] : ld.image ?? null;
 
-  // type slug like "exotic-luxury-rental" -> "EXOTIC"
   const typeMap: Record<string, string> = {
     "car-rental": "CAR",
     "suv-rental": "SUV",
@@ -380,9 +417,7 @@ async function fetchVehicle(
     vehicle_id: v.id,
     city: citySlug,
     make: make ? String(make) : null,
-    model: model
-      ? model.replace(/\b\w/g, (c) => c.toUpperCase())
-      : null,
+    model: model ? model.replace(/\b\w/g, (c) => c.toUpperCase()) : null,
     year,
     trim: null,
     vehicle_type: typeMap[v.type] ?? null,
