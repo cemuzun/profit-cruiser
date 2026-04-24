@@ -241,6 +241,11 @@ function buildSearchUrl(
 async function discoverVehicleIds(
   city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
   citySlugInUrl: string,
+  filters?: {
+    vehicle_types: string[];
+    min_daily_price: number | null;
+    max_daily_price: number | null;
+  } | null,
 ): Promise<FoundVehicle[]> {
   const found = new Map<string, FoundVehicle>();
 
