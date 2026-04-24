@@ -26,6 +26,16 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
 
+// Strip listed keys from `obj` if their value is null/undefined.
+// Use before upsert so a failed-parse fetch doesn't blank out good data.
+function stripNulls<T extends Record<string, unknown>>(obj: T, keys: string[]): Partial<T> {
+  const out: Record<string, unknown> = { ...obj };
+  for (const k of keys) {
+    if (out[k] == null) delete out[k];
+  }
+  return out as Partial<T>;
+}
+
 // Detect Cloudflare interstitials / "Just a moment" / empty pages.
 // If we get one of these, the body is junk and must NOT be parsed as a listing.
 function isBlockedPage(body: string): boolean {
