@@ -466,7 +466,51 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const city = String(body?.city ?? "").trim();
-    const all = !!body?.all || (!city);
+    const vehicleId = String(body?.vehicleId ?? "").trim();
+    const all = !!body?.all || (!city && !vehicleId);
+
+    // Targeted single-vehicle refresh: re-fetch one listing and upsert.
+    if (vehicleId) {
+      const { data: existing, error: exErr } = await supabase
+        .from("listings_current")
+        .select("vehicle_id, city, listing_url, make, model, vehicle_type")
+        .eq("vehicle_id", vehicleId)
+        .single();
+      if (exErr || !existing) {
+        return new Response(JSON.stringify({ error: `vehicle ${vehicleId} not found` }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const href = existing.listing_url ||
+        `https://turo.com/us/en/suv-rental/united-states/los-angeles-ca/x/x/${vehicleId}`;
+      const row = await fetchVehicle(
+        {
+          id: vehicleId,
+          href,
+          make: existing.make ?? "",
+          model: existing.model ?? "",
+          type: (existing.vehicle_type ?? "car-rental").toLowerCase().includes("suv")
+            ? "suv-rental"
+            : "car-rental",
+        },
+        existing.city,
+      );
+      if (!row) {
+        return new Response(JSON.stringify({ ok: false, error: "fetch returned null" }), {
+          status: 502,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const { error: upErr } = await supabase
+        .from("listings_current")
+        .upsert(row, { onConflict: "vehicle_id" });
+      if (upErr) throw upErr;
+      return new Response(JSON.stringify({ ok: true, vehicle: row }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     // Single-city invocations always run in the background so the HTTP
     // response is immediate and we don't hit the 150s edge timeout.
     const background = !!body?.background || !all;
