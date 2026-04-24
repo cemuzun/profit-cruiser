@@ -1,0 +1,1 @@
+ALTER VIEW public.trip_count_daily SET (security_invoker = true);
