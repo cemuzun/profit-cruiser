@@ -21,9 +21,55 @@ const corsHeaders = {
 };
 
 const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
+const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
+
+// Detect Cloudflare interstitials / "Just a moment" / empty pages.
+// If we get one of these, the body is junk and must NOT be parsed as a listing.
+function isBlockedPage(body: string): boolean {
+  if (!body || body.length < 500) return true;
+  const head = body.slice(0, 4000).toLowerCase();
+  if (head.includes("just a moment")) return true;
+  if (head.includes("cf-mitigated") || head.includes("cf-chl-")) return true;
+  if (head.includes("attention required") && head.includes("cloudflare")) return true;
+  if (head.includes("challenge-platform")) return true;
+  if (head.includes("enable javascript and cookies")) return true;
+  return false;
+}
+
+// Firecrawl fallback: used when Zyte returns a blocked / challenge page.
+// Firecrawl uses its own browser pool + stealth and usually beats Cloudflare.
+async function firecrawlText(url: string): Promise<{ status: number; body: string }> {
+  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+  try {
+    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["rawHtml"],
+        onlyMainContent: false,
+        location: { country: "US", languages: ["en"] },
+      }),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      console.warn(`firecrawl ${res.status} for ${url}: ${t.slice(0, 200)}`);
+      return { status: res.status, body: "" };
+    }
+    const data = await res.json();
+    const html = data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? "";
+    return { status: data?.data?.metadata?.statusCode ?? 200, body: html };
+  } catch (e) {
+    console.warn(`firecrawl threw for ${url}:`, e);
+    return { status: 0, body: "" };
+  }
+}
 
 // ---------- Zyte helpers ----------
 async function zyteText(
