@@ -43,7 +43,8 @@ async function zyteFetch(
     // first paint and is not present in the SSR HTML. ~10x cost vs basic.
     reqBody.browserHtml = true;
     reqBody.javascript = true;
-    reqBody.actions = [{ action: "waitForTimeout", timeout: 4000 }];
+    // Wait a few seconds after load so calendar XHR completes & state hydrates.
+    reqBody.browserHtmlOptions = { waitForSelectorOptions: { timeout: 4000 } };
   } else {
     reqBody.httpResponseBody = true;
     if (opts.json) {
