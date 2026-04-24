@@ -198,6 +198,44 @@ async function saveScrapeFilters(f: Omit<ScrapeFilters, "updated_at">) {
   if (error) throw error;
 }
 
+export type PriceAnomaly = {
+  id: string;
+  vehicle_id: string;
+  city: string | null;
+  make: string | null;
+  model: string | null;
+  year: number | null;
+  attempted_price: number | null;
+  previous_price: number | null;
+  kept_price: number | null;
+  reason: string;
+  source: string | null;
+  listing_url: string | null;
+  detected_at: string;
+  reviewed: boolean;
+  reviewed_at: string | null;
+};
+
+async function fetchPriceAnomalies(opts: { onlyUnreviewed?: boolean; limit?: number } = {}): Promise<PriceAnomaly[]> {
+  let q = supabase
+    .from("price_anomalies")
+    .select("*")
+    .order("detected_at", { ascending: false })
+    .limit(opts.limit ?? 500);
+  if (opts.onlyUnreviewed) q = q.eq("reviewed", false);
+  const { data, error } = await q;
+  if (error) throw error;
+  return (data ?? []) as PriceAnomaly[];
+}
+
+async function setAnomalyReviewed(id: string, reviewed: boolean) {
+  const { error } = await supabase
+    .from("price_anomalies")
+    .update({ reviewed, reviewed_at: reviewed ? new Date().toISOString() : null })
+    .eq("id", id);
+  if (error) throw error;
+}
+
 export const ds = {
   listings: () => fetchAllListings(),
   snapshots: () => fetchSnapshots(),
@@ -206,6 +244,8 @@ export const ds = {
   cities: () => fetchCities(),
   scrapeFilters: () => fetchScrapeFilters(),
   saveScrapeFilters,
+  priceAnomalies: (opts?: { onlyUnreviewed?: boolean; limit?: number }) => fetchPriceAnomalies(opts),
+  setAnomalyReviewed,
 
   async addCity(city: Omit<City, "active"> & { active?: boolean }) {
     const { error } = await supabase.from("cities").insert({
