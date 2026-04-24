@@ -1,9 +1,9 @@
 // Turo scraper using Zyte API + SSR HTML + JSON-LD.
 //
-// Strategy (no auth, no browser, no Cloudflare bypass needed):
+// Strategy (no auth, no browser, Cloudflare bypass via proxy rotation):
 //   1. Fetch Turo's official sitemaps to discover landing-page URLs for the
 //      city across all categories (car-rental, suv-rental, exotic-luxury, etc.)
-//   2. Fetch each landing page (plain HTTP via Zyte) and extract Honolulu
+//   2. Fetch each landing page (plain HTTP via Zyte or backup proxies) and extract
 //      vehicle URLs from the SSR HTML.
 //   3. Fetch each vehicle detail page and parse the embedded JSON-LD Product
 //      schema for price, rating, name, image.
@@ -21,7 +21,8 @@ const corsHeaders = {
 };
 
 const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
-const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
+const TURO_PROXY_URL = Deno.env.get("TURO_PROXY_URL") ?? "";
+const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
@@ -49,34 +50,30 @@ function isBlockedPage(body: string): boolean {
   return false;
 }
 
-// Firecrawl fallback: used when Zyte returns a blocked / challenge page.
-// Firecrawl uses its own browser pool + stealth and usually beats Cloudflare.
-async function firecrawlText(url: string): Promise<{ status: number; body: string }> {
-  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+// Backup proxy fetch using TURO_PROXY_URL (Geonix-based service)
+async function backupProxyText(url: string): Promise<{ status: number; body: string }> {
+  const proxyUrl = TURO_PROXY_URL || GEONIX_PROXY_URL;
+  if (!proxyUrl) return { status: 0, body: "" };
   try {
-    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
-      method: "POST",
+    const target = encodeURIComponent(url);
+    const res = await fetch(`${proxyUrl}?url=${target}`, {
+      method: "GET",
       headers: {
-        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
-        "Content-Type": "application/json",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
       },
-      body: JSON.stringify({
-        url,
-        formats: ["rawHtml"],
-        onlyMainContent: false,
-        location: { country: "US", languages: ["en"] },
-      }),
     });
     if (!res.ok) {
-      const t = await res.text();
-      console.warn(`firecrawl ${res.status} for ${url}: ${t.slice(0, 200)}`);
+      console.warn(`backup proxy ${res.status} for ${url}`);
       return { status: res.status, body: "" };
     }
-    const data = await res.json();
-    const html = data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? "";
-    return { status: data?.data?.metadata?.statusCode ?? 200, body: html };
+    const body = await res.text();
+    return { status: res.status, body };
   } catch (e) {
-    console.warn(`firecrawl threw for ${url}:`, e);
+    console.warn(`backup proxy threw for ${url}:`, e);
     return { status: 0, body: "" };
   }
 }
@@ -346,13 +343,13 @@ async function fetchVehicle(
   let res = await zyteText(v.href);
   let source = "zyte";
 
-  // If Zyte got a non-200 OR a Cloudflare challenge page, try Firecrawl.
+  // If Zyte got a non-200 OR a Cloudflare challenge page, try backup proxy.
   if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
-    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying firecrawl`);
-    const fc = await firecrawlText(v.href);
-    if (fc.body && !isBlockedPage(fc.body) && extractLdProduct(fc.body)) {
-      res = fc;
-      source = "firecrawl";
+    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
+    const bp = await backupProxyText(v.href);
+    if (bp.body && !isBlockedPage(bp.body) && extractLdProduct(bp.body)) {
+      res = bp;
+      source = "backup_proxy";
     }
   }
 
