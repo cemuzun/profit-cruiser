@@ -21,9 +21,65 @@ const corsHeaders = {
 };
 
 const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
+const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
+
+// Strip listed keys from `obj` if their value is null/undefined.
+// Use before upsert so a failed-parse fetch doesn't blank out good data.
+function stripNulls<T extends Record<string, unknown>>(obj: T, keys: string[]): Partial<T> {
+  const out: Record<string, unknown> = { ...obj };
+  for (const k of keys) {
+    if (out[k] == null) delete out[k];
+  }
+  return out as Partial<T>;
+}
+
+// Detect Cloudflare interstitials / "Just a moment" / empty pages.
+// If we get one of these, the body is junk and must NOT be parsed as a listing.
+function isBlockedPage(body: string): boolean {
+  if (!body || body.length < 500) return true;
+  const head = body.slice(0, 4000).toLowerCase();
+  if (head.includes("just a moment")) return true;
+  if (head.includes("cf-mitigated") || head.includes("cf-chl-")) return true;
+  if (head.includes("attention required") && head.includes("cloudflare")) return true;
+  if (head.includes("challenge-platform")) return true;
+  if (head.includes("enable javascript and cookies")) return true;
+  return false;
+}
+
+// Firecrawl fallback: used when Zyte returns a blocked / challenge page.
+// Firecrawl uses its own browser pool + stealth and usually beats Cloudflare.
+async function firecrawlText(url: string): Promise<{ status: number; body: string }> {
+  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+  try {
+    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["rawHtml"],
+        onlyMainContent: false,
+        location: { country: "US", languages: ["en"] },
+      }),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      console.warn(`firecrawl ${res.status} for ${url}: ${t.slice(0, 200)}`);
+      return { status: res.status, body: "" };
+    }
+    const data = await res.json();
+    const html = data?.data?.rawHtml ?? data?.rawHtml ?? data?.data?.html ?? data?.html ?? "";
+    return { status: data?.data?.metadata?.statusCode ?? 200, body: html };
+  } catch (e) {
+    console.warn(`firecrawl threw for ${url}:`, e);
+    return { status: 0, body: "" };
+  }
+}
 
 // ---------- Zyte helpers ----------
 async function zyteText(
@@ -287,22 +343,38 @@ async function fetchVehicle(
   v: { id: string; href: string; make: string; model: string; type: string },
   citySlug: string,
 ) {
-  const res = await zyteText(v.href);
-  if (res.status !== 200) {
-    console.warn(`detail ${v.id}: status ${res.status}`);
+  let res = await zyteText(v.href);
+  let source = "zyte";
+
+  // If Zyte got a non-200 OR a Cloudflare challenge page, try Firecrawl.
+  if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
+    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying firecrawl`);
+    const fc = await firecrawlText(v.href);
+    if (fc.body && !isBlockedPage(fc.body) && extractLdProduct(fc.body)) {
+      res = fc;
+      source = "firecrawl";
+    }
+  }
+
+  if (res.status !== 200 && source === "zyte") {
+    console.warn(`detail ${v.id}: status ${res.status}, no fallback succeeded`);
     return null;
   }
+  if (isBlockedPage(res.body)) {
+    console.warn(`detail ${v.id}: blocked page from both providers — skipping`);
+    return null;
+  }
+
   const ld = extractLdProduct(res.body);
   if (!ld) {
-    console.warn(`detail ${v.id}: no JSON-LD Product`);
+    console.warn(`detail ${v.id}: no JSON-LD Product (source=${source})`);
     return null;
   }
   const { year, model } = parseYearAndModel(ld.name, v.model);
   const make = ld.brand?.name ?? v.make ?? null;
-  // Prefer the explicit "$NNN/day" value from the meta description / page text.
-  // Turo's JSON-LD offers.price is unreliable: it varies with the page's default
-  // trip dates and sometimes returns a multi-day total instead of the daily rate
-  // (e.g. a Lamborghini Urus showing $312/day was stored as $1,760 from offers.price).
+
+  // Price extraction: prefer "$NNN/day" visible text over JSON-LD offers.price
+  // (offers.price sometimes returns multi-day totals).
   let price: number | null = null;
   const dailyMatch = res.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*\/\s*day/i);
   if (dailyMatch) {
@@ -312,12 +384,33 @@ async function fetchVehicle(
   if (price == null && typeof ld.offers?.price === "number") {
     price = ld.offers.price;
   }
+
+  // Sanity guard: if we have a previous price for this vehicle and the new
+  // value differs by more than 5x in either direction, treat it as a parse
+  // error and DROP the price (keep the row, but don't overwrite the good one).
+  if (price != null) {
+    const { data: prev } = await supabase
+      .from("listings_current")
+      .select("avg_daily_price")
+      .eq("vehicle_id", v.id)
+      .maybeSingle();
+    const prevPrice = prev?.avg_daily_price ? Number(prev.avg_daily_price) : null;
+    if (prevPrice && prevPrice > 0) {
+      const ratio = price / prevPrice;
+      if (ratio > 5 || ratio < 0.2) {
+        console.warn(
+          `detail ${v.id}: price ${price} differs >5x from prev ${prevPrice} (source=${source}) — dropping new price`,
+        );
+        price = null;
+      }
+    }
+  }
+
   const currency = ld.offers?.priceCurrency ?? "USD";
   const rating = typeof ld.aggregateRating?.ratingValue === "number" ? ld.aggregateRating.ratingValue : null;
   const trips = typeof ld.aggregateRating?.ratingCount === "number" ? ld.aggregateRating.ratingCount : null;
   const image = Array.isArray(ld.image) ? ld.image[0] : ld.image ?? null;
 
-  // type slug like "exotic-luxury-rental" -> "EXOTIC"
   const typeMap: Record<string, string> = {
     "car-rental": "CAR",
     "suv-rental": "SUV",
@@ -334,9 +427,7 @@ async function fetchVehicle(
     vehicle_id: v.id,
     city: citySlug,
     make: make ? String(make) : null,
-    model: model
-      ? model.replace(/\b\w/g, (c) => c.toUpperCase())
-      : null,
+    model: model ? model.replace(/\b\w/g, (c) => c.toUpperCase()) : null,
     year,
     trim: null,
     vehicle_type: typeMap[v.type] ?? null,
@@ -417,9 +508,12 @@ async function runScrape(citySlug: string) {
     console.log(`Parsed ${vehicles.length} vehicles with prices`);
 
     if (vehicles.length) {
+      const cleaned = vehicles.map((v) =>
+        stripNulls(v, ["avg_daily_price", "rating", "completed_trips", "image_url"]),
+      );
       const { error: upErr } = await supabase
         .from("listings_current")
-        .upsert(vehicles, { onConflict: "vehicle_id" });
+        .upsert(cleaned, { onConflict: "vehicle_id" });
       if (upErr) throw upErr;
 
       const snaps = vehicles.map((v) => {
@@ -502,9 +596,12 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+      // Don't overwrite previously-good fields with null (price/rating/trips
+      // can be null when the sanity guard rejects a parse, or when CF blocks).
+      const cleanRow = stripNulls(row, ["avg_daily_price", "rating", "completed_trips", "image_url"]);
       const { error: upErr } = await supabase
         .from("listings_current")
-        .upsert(row, { onConflict: "vehicle_id" });
+        .upsert(cleanRow, { onConflict: "vehicle_id" });
       if (upErr) throw upErr;
       return new Response(JSON.stringify({ ok: true, vehicle: row }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
