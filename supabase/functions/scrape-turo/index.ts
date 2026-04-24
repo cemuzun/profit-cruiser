@@ -590,15 +590,18 @@ async function runScrape(citySlug: string) {
     const filters = filtRow && filtRow.enabled
       ? {
           vehicle_types: (filtRow.vehicle_types ?? []) as string[],
+          fuel_types: ((filtRow.fuel_types ?? []) as string[]).map((f) => f.toUpperCase()),
           min_daily_price: filtRow.min_daily_price != null ? Number(filtRow.min_daily_price) : null,
           max_daily_price: filtRow.max_daily_price != null ? Number(filtRow.max_daily_price) : null,
           min_year: filtRow.min_year != null ? Number(filtRow.min_year) : null,
           max_year: filtRow.max_year != null ? Number(filtRow.max_year) : null,
+          min_trips: filtRow.min_trips != null ? Number(filtRow.min_trips) : null,
+          min_rating: filtRow.min_rating != null ? Number(filtRow.min_rating) : null,
         }
       : null;
     if (filters) {
       console.log(
-        `Scrape filters active: types=${filters.vehicle_types.length || "all"} price=[${filters.min_daily_price ?? "-"},${filters.max_daily_price ?? "-"}] year=[${filters.min_year ?? "-"},${filters.max_year ?? "-"}]`,
+        `Scrape filters active: types=${filters.vehicle_types.length || "all"} fuels=${filters.fuel_types.length || "all"} price=[${filters.min_daily_price ?? "-"},${filters.max_daily_price ?? "-"}] year=[${filters.min_year ?? "-"},${filters.max_year ?? "-"}] minTrips=${filters.min_trips ?? "-"} minRating=${filters.min_rating ?? "-"}`,
       );
     }
 
@@ -635,12 +638,19 @@ async function runScrape(citySlug: string) {
         try {
           const row = await fetchVehicle(v, citySlug);
           if (!row) continue;
-          // Apply post-fetch filters: drop vehicles outside year or price range.
+          // Apply post-fetch filters: drop vehicles outside year/price/trips/rating/fuel.
           if (filters) {
             if (filters.min_year != null && row.year != null && row.year < filters.min_year) continue;
             if (filters.max_year != null && row.year != null && row.year > filters.max_year) continue;
             if (filters.min_daily_price != null && row.avg_daily_price != null && row.avg_daily_price < filters.min_daily_price) continue;
             if (filters.max_daily_price != null && row.avg_daily_price != null && row.avg_daily_price > filters.max_daily_price) continue;
+            if (filters.min_trips != null && (row.completed_trips ?? 0) < filters.min_trips) continue;
+            if (filters.min_rating != null && (row.rating ?? 0) < filters.min_rating) continue;
+            // Fuel filter: only enforce when listing has a known fuel_type.
+            // Listings with null fuel_type pass through (Turo doesn't always expose it).
+            if (filters.fuel_types.length > 0 && row.fuel_type) {
+              if (!filters.fuel_types.includes(String(row.fuel_type).toUpperCase())) continue;
+            }
           }
           vehicles.push(row);
         } catch (e) {

@@ -467,30 +467,39 @@ export type Database = {
       scrape_filters: {
         Row: {
           enabled: boolean
+          fuel_types: string[]
           id: number
           max_daily_price: number | null
           max_year: number | null
           min_daily_price: number | null
+          min_rating: number | null
+          min_trips: number | null
           min_year: number | null
           updated_at: string
           vehicle_types: string[]
         }
         Insert: {
           enabled?: boolean
+          fuel_types?: string[]
           id?: number
           max_daily_price?: number | null
           max_year?: number | null
           min_daily_price?: number | null
+          min_rating?: number | null
+          min_trips?: number | null
           min_year?: number | null
           updated_at?: string
           vehicle_types?: string[]
         }
         Update: {
           enabled?: boolean
+          fuel_types?: string[]
           id?: number
           max_daily_price?: number | null
           max_year?: number | null
           min_daily_price?: number | null
+          min_rating?: number | null
+          min_trips?: number | null
           min_year?: number | null
           updated_at?: string
           vehicle_types?: string[]

@@ -157,13 +157,18 @@ async function fetchCities(): Promise<City[]> {
 
 export type ScrapeFilters = {
   vehicle_types: string[];
+  fuel_types: string[];
   min_daily_price: number | null;
   max_daily_price: number | null;
   min_year: number | null;
   max_year: number | null;
+  min_trips: number | null;
+  min_rating: number | null;
   enabled: boolean;
   updated_at?: string;
 };
+
+export const ALL_FUEL_TYPES = ["GAS", "HYBRID", "ELECTRIC", "DIESEL"] as const;
 
 export const ALL_VEHICLE_TYPES = [
   "car-rental",
@@ -185,7 +190,7 @@ async function fetchScrapeFilters(): Promise<ScrapeFilters> {
     .maybeSingle();
   if (error) throw error;
   if (!data) {
-    return { vehicle_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, enabled: true };
+    return { vehicle_types: [], fuel_types: [], min_daily_price: null, max_daily_price: null, min_year: null, max_year: null, min_trips: null, min_rating: null, enabled: true };
   }
   return data as ScrapeFilters;
 }
