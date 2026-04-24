@@ -465,9 +465,26 @@ async function fetchVehicle(
     }
   }
 
-  // Sanity guard: if we have a previous price for this vehicle and the new
-  // value differs by more than 5x in either direction, treat it as a parse
-  // error and DROP the price (keep the row, but don't overwrite the good one).
+  // Class-based MIN floor — drop absurdly low prices for premium vehicles.
+  // Example: Lamborghini Urus parsed at $306/day is almost certainly a
+  // promo/deposit/wrong-element parse, not a real daily rate.
+  if (price != null) {
+    const make = (ld.brand?.name ?? v.make ?? "").toLowerCase();
+    const minFloor = (() => {
+      if (/ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani/.test(make)) return 500;
+      if (/maserati|porsche|lucid|mercedes.*amg|bmw.*m[0-9]|audi.*r[s8]/.test(make)) return 150;
+      return 0;
+    })();
+    if (price < minFloor) {
+      console.warn(
+        `detail ${v.id}: price ${price} below class min ${minFloor} for ${make} — dropping`,
+      );
+      price = null;
+    }
+  }
+
+  // Sanity guard: compare against previous price. Tightened from 5x to 3x
+  // because $1760→$306 (5.75x drop) is implausible for a real price change.
   if (price != null) {
     const { data: prev } = await supabase
       .from("listings_current")
@@ -477,9 +494,9 @@ async function fetchVehicle(
     const prevPrice = prev?.avg_daily_price ? Number(prev.avg_daily_price) : null;
     if (prevPrice && prevPrice > 0) {
       const ratio = price / prevPrice;
-      if (ratio > 5 || ratio < 0.2) {
+      if (ratio > 3 || ratio < 0.33) {
         console.warn(
-          `detail ${v.id}: price ${price} differs >5x from prev ${prevPrice} (source=${source}) — dropping new price`,
+          `detail ${v.id}: price ${price} differs >3x from prev ${prevPrice} (source=${source}) — dropping new price`,
         );
         price = null;
       }
