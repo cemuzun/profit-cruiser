@@ -630,6 +630,16 @@ async function runScrape(citySlug: string) {
     // Fetch detail pages with limited concurrency
     const CONCURRENCY = 5;
     const vehicles: any[] = [];
+    const droppedReasons: Record<string, number> = {};
+    const bumpDropped = (reason: string) => {
+      droppedReasons[reason] = (droppedReasons[reason] ?? 0) + 1;
+    };
+    // Sanity bounds for year. Anything outside is almost certainly a parse
+    // error (e.g. a phone-number fragment matched as a year).
+    const NOW_YEAR = new Date().getUTCFullYear();
+    const YEAR_MIN = 1980;
+    const YEAR_MAX = NOW_YEAR + 2; // allow next-model-year listings
+
     let i = 0;
     async function worker() {
       while (i < found.length) {
@@ -638,7 +648,75 @@ async function runScrape(citySlug: string) {
         try {
           const row = await fetchVehicle(v, citySlug);
           if (!row) continue;
-          // Apply post-fetch filters: drop vehicles outside year/price/trips/rating/fuel.
+
+          // ---- Validity filters: drop incomplete / suspicious listings ----
+          // These run BEFORE user filters so anomalies are logged consistently
+          // regardless of whether the user has filters enabled.
+          const missing: string[] = [];
+          if (!row.make || !String(row.make).trim()) missing.push("make");
+          if (!row.model || !String(row.model).trim()) missing.push("model");
+          if (row.year == null) missing.push("year");
+          if (missing.length) {
+            const reason = `missing_fields:${missing.join(",")}`;
+            bumpDropped(reason);
+            await supabase.from("price_anomalies").insert({
+              vehicle_id: row.vehicle_id,
+              city: citySlug,
+              make: row.make ?? null,
+              model: row.model ?? null,
+              year: row.year ?? null,
+              attempted_price: row.avg_daily_price ?? null,
+              previous_price: null,
+              kept_price: null,
+              reason,
+              source: "validity_filter",
+              listing_url: row.listing_url ?? v.href,
+            });
+            continue;
+          }
+          if (row.year != null && (row.year < YEAR_MIN || row.year > YEAR_MAX)) {
+            const reason = `suspicious_year:${row.year}`;
+            bumpDropped(reason);
+            await supabase.from("price_anomalies").insert({
+              vehicle_id: row.vehicle_id,
+              city: citySlug,
+              make: row.make ?? null,
+              model: row.model ?? null,
+              year: row.year,
+              attempted_price: row.avg_daily_price ?? null,
+              previous_price: null,
+              kept_price: null,
+              reason,
+              source: "validity_filter",
+              listing_url: row.listing_url ?? v.href,
+            });
+            continue;
+          }
+          // Suspicious availability proxy: a listing claiming a rating but
+          // zero trips, or trips but no rating, is internally inconsistent.
+          // (Real Turo listings either have both or neither.)
+          const trips = row.completed_trips ?? 0;
+          const rating = row.rating ?? 0;
+          if ((trips > 0 && rating === 0) || (rating > 0 && trips === 0)) {
+            const reason = `inconsistent_trips_rating:trips=${trips},rating=${rating}`;
+            bumpDropped(reason);
+            await supabase.from("price_anomalies").insert({
+              vehicle_id: row.vehicle_id,
+              city: citySlug,
+              make: row.make ?? null,
+              model: row.model ?? null,
+              year: row.year ?? null,
+              attempted_price: row.avg_daily_price ?? null,
+              previous_price: null,
+              kept_price: null,
+              reason,
+              source: "validity_filter",
+              listing_url: row.listing_url ?? v.href,
+            });
+            continue;
+          }
+
+          // ---- User filters (apply only when enabled) ----
           if (filters) {
             if (filters.min_year != null && row.year != null && row.year < filters.min_year) continue;
             if (filters.max_year != null && row.year != null && row.year > filters.max_year) continue;
@@ -659,7 +737,12 @@ async function runScrape(citySlug: string) {
       }
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-    console.log(`Parsed ${vehicles.length} vehicles with prices`);
+    const droppedTotal = Object.values(droppedReasons).reduce((a, b) => a + b, 0);
+    console.log(
+      `Parsed ${vehicles.length} valid vehicles (${droppedTotal} dropped by validity filters: ${
+        Object.entries(droppedReasons).map(([k, n]) => `${k}=${n}`).join(", ") || "none"
+      })`,
+    );
 
     if (vehicles.length) {
       const cleaned = vehicles.map((v) =>
