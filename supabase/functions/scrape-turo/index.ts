@@ -261,8 +261,23 @@ async function discoverVehicleIds(
     "g",
   );
 
-  for (const cat of CATEGORY_SLUGS) {
-    for (const [lo, hi] of PRICE_BUCKETS) {
+  const activeCats = filters?.vehicle_types?.length
+    ? CATEGORY_SLUGS.filter((c) => filters!.vehicle_types.includes(c))
+    : CATEGORY_SLUGS;
+
+  const minP = filters?.min_daily_price ?? null;
+  const maxP = filters?.max_daily_price ?? null;
+  const activeBuckets = PRICE_BUCKETS.filter(([lo, hi]) => {
+    if (minP != null && hi <= minP) return false;
+    if (maxP != null && lo >= maxP) return false;
+    return true;
+  }).map(([lo, hi]) => [
+    minP != null ? Math.max(lo, minP) : lo,
+    maxP != null ? Math.min(hi, maxP) : hi,
+  ] as [number, number]);
+
+  for (const cat of activeCats) {
+    for (const [lo, hi] of activeBuckets) {
       const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`;
       let res;
       try {
