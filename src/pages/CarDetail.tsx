@@ -63,6 +63,61 @@ export default function CarDetail() {
     enabled: !!id,
   });
 
+  const { data: calendarDays } = useQuery({
+    queryKey: ["car-calendar", id],
+    queryFn: async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data, error } = await supabase
+        .from("listing_calendar_days")
+        .select("day, is_available, daily_price, captured_on")
+        .eq("vehicle_id", id!)
+        .gte("day", today)
+        .order("day", { ascending: true })
+        .limit(120);
+      if (error) throw error;
+      // de-dup by day, keeping the most recent capture
+      const byDay = new Map<string, { day: string; is_available: boolean | null; daily_price: number | null; captured_on: string }>();
+      for (const r of (data ?? []) as any[]) {
+        const existing = byDay.get(r.day);
+        if (!existing || r.captured_on > existing.captured_on) byDay.set(r.day, r);
+      }
+      return Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day));
+    },
+    enabled: !!id,
+  });
+
+  const calendarAverages = useMemo(() => {
+    const days = calendarDays ?? [];
+    const avg = (n: number) => {
+      const slice = days.slice(0, n).map(d => Number(d.daily_price)).filter(v => Number.isFinite(v) && v > 0);
+      if (!slice.length) return null;
+      return slice.reduce((a, b) => a + b, 0) / slice.length;
+    };
+    const availability = (n: number) => {
+      const slice = days.slice(0, n);
+      if (!slice.length) return null;
+      const booked = slice.filter(d => d.is_available === false).length;
+      return Math.round((booked / slice.length) * 100);
+    };
+    return {
+      d7: avg(7), d14: avg(14), d30: avg(30),
+      booked7: availability(7), booked14: availability(14), booked30: availability(30),
+      hasData: days.length > 0,
+    };
+  }, [calendarDays]);
+
+  const triggerCalendar = useMutation({
+    mutationFn: async () => {
+      const { error } = await supabase.functions.invoke("scrape-calendar", { body: { vehicleId: id } });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Calendar scrape started — refresh in ~30s");
+      setTimeout(() => qc.invalidateQueries({ queryKey: ["car-calendar", id] }), 30_000);
+    },
+    onError: (e: Error) => toast.error(e.message ?? "Calendar scrape failed"),
+  });
+
   const { data: override } = useQuery({
     queryKey: ["override", id],
     queryFn: async () => userStore.getOverride(id!),
