@@ -15,11 +15,12 @@ import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink, Download } f
 import { supabase } from "@/integrations/supabase/client";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
-function PriceTile({ label, value }: { label: string; value: number | null | undefined }) {
+function PriceTile({ label, value, sub }: { label: string; value: number | null | undefined; sub?: string | null }) {
   return (
     <div className="border border-border rounded-md p-2">
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="text-sm font-semibold">{fmtUSD(value)}</div>
+      {sub && <div className="text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
     </div>
   );
 }
@@ -61,6 +62,61 @@ export default function CarDetail() {
         .sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
     },
     enabled: !!id,
+  });
+
+  const { data: calendarDays } = useQuery({
+    queryKey: ["car-calendar", id],
+    queryFn: async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data, error } = await supabase
+        .from("listing_calendar_days")
+        .select("day, is_available, daily_price, captured_on")
+        .eq("vehicle_id", id!)
+        .gte("day", today)
+        .order("day", { ascending: true })
+        .limit(120);
+      if (error) throw error;
+      // de-dup by day, keeping the most recent capture
+      const byDay = new Map<string, { day: string; is_available: boolean | null; daily_price: number | null; captured_on: string }>();
+      for (const r of (data ?? []) as any[]) {
+        const existing = byDay.get(r.day);
+        if (!existing || r.captured_on > existing.captured_on) byDay.set(r.day, r);
+      }
+      return Array.from(byDay.values()).sort((a, b) => a.day.localeCompare(b.day));
+    },
+    enabled: !!id,
+  });
+
+  const calendarAverages = useMemo(() => {
+    const days = calendarDays ?? [];
+    const avg = (n: number) => {
+      const slice = days.slice(0, n).map(d => Number(d.daily_price)).filter(v => Number.isFinite(v) && v > 0);
+      if (!slice.length) return null;
+      return slice.reduce((a, b) => a + b, 0) / slice.length;
+    };
+    const availability = (n: number) => {
+      const slice = days.slice(0, n);
+      if (!slice.length) return null;
+      const booked = slice.filter(d => d.is_available === false).length;
+      return Math.round((booked / slice.length) * 100);
+    };
+    return {
+      d7: avg(7), d14: avg(14), d30: avg(30),
+      booked7: availability(7), booked14: availability(14), booked30: availability(30),
+      hasData: days.length > 0,
+    };
+  }, [calendarDays]);
+
+  const triggerCalendar = useMutation({
+    mutationFn: async () => {
+      const { error } = await supabase.functions.invoke("scrape-calendar", { body: { vehicleId: id } });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("Calendar scrape started — refresh in ~30s");
+      setTimeout(() => qc.invalidateQueries({ queryKey: ["car-calendar", id] }), 30_000);
+    },
+    onError: (e: Error) => toast.error(e.message ?? "Calendar scrape failed"),
   });
 
   const { data: override } = useQuery({
@@ -212,17 +268,40 @@ export default function CarDetail() {
                   </p>
                   <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <PriceTile label="Now" value={car.avg_daily_price} />
-                    <PriceTile label="Next 7 days" value={(car as any).price_7d_avg} />
-                    <PriceTile label="Next 14 days" value={(car as any).price_14d_avg} />
-                    <PriceTile label="Next 30 days" value={(car as any).price_30d_avg} />
+                    <PriceTile
+                      label="Next 7 days"
+                      value={calendarAverages.d7 ?? (car as any).price_7d_avg}
+                      sub={calendarAverages.booked7 != null ? `${calendarAverages.booked7}% booked` : (calendarAverages.d7 != null ? "calendar" : "listing avg")}
+                    />
+                    <PriceTile
+                      label="Next 14 days"
+                      value={calendarAverages.d14 ?? (car as any).price_14d_avg}
+                      sub={calendarAverages.booked14 != null ? `${calendarAverages.booked14}% booked` : (calendarAverages.d14 != null ? "calendar" : "listing avg")}
+                    />
+                    <PriceTile
+                      label="Next 30 days"
+                      value={calendarAverages.d30 ?? (car as any).price_30d_avg}
+                      sub={calendarAverages.booked30 != null ? `${calendarAverages.booked30}% booked` : (calendarAverages.d30 != null ? "calendar" : "listing avg")}
+                    />
                   </div>
-                  <Button
-                    variant="outline" size="sm" className="mt-3"
-                    onClick={() => toggleWatch.mutate()}
-                  >
-                    {inWatchlist ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
-                    {inWatchlist ? "In watchlist" : "Save to watchlist"}
-                  </Button>
+                  <div className="mt-3 flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline" size="sm"
+                      onClick={() => toggleWatch.mutate()}
+                    >
+                      {inWatchlist ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                      {inWatchlist ? "In watchlist" : "Save to watchlist"}
+                    </Button>
+                    <Button
+                      variant="outline" size="sm"
+                      disabled={triggerCalendar.isPending}
+                      onClick={() => triggerCalendar.mutate()}
+                      title="Fetch 90-day availability & pricing for this car"
+                    >
+                      {triggerCalendar.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      {calendarAverages.hasData ? "Refresh calendar" : "Fetch calendar"}
+                    </Button>
+                  </div>
                 </div>
               </div>
 
@@ -277,6 +356,80 @@ export default function CarDetail() {
                   </div>
                 )}
               </div>
+            </CardContent>
+          </Card>
+
+          <Card className="lg:col-span-3">
+            <CardContent className="pt-4">
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div>
+                  <h2 className="font-semibold">Daily availability & pricing — next 90 days</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Captured directly from Turo's calendar. Greyed cells are booked/unavailable.
+                  </p>
+                </div>
+                {calendarDays && calendarDays.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {calendarDays.length} days · last captured {format(new Date(calendarDays[0].captured_on), "MMM d")}
+                  </p>
+                )}
+              </div>
+              {calendarDays && calendarDays.length > 0 ? (
+                <>
+                  <div className="h-48 mb-4">
+                    <ResponsiveContainer>
+                      <LineChart data={calendarDays.map(d => ({
+                        day: format(new Date(d.day), "MMM d"),
+                        price: d.is_available === false ? null : Number(d.daily_price) || null,
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={10} interval={6} />
+                        <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `$${v}`} />
+                        <Tooltip
+                          contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
+                          formatter={(val: any) => (val == null ? "Booked" : `$${Number(val).toFixed(0)}`)}
+                        />
+                        <Line type="monotone" dataKey="price" name="Daily price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="grid grid-cols-7 sm:grid-cols-10 md:grid-cols-15 gap-1">
+                    {calendarDays.map((d) => {
+                      const booked = d.is_available === false;
+                      const price = Number(d.daily_price);
+                      return (
+                        <div
+                          key={d.day}
+                          className={`text-center rounded-sm border px-1 py-1.5 text-[10px] ${
+                            booked
+                              ? "bg-muted/50 border-border text-muted-foreground"
+                              : "bg-card border-primary/30"
+                          }`}
+                          title={`${d.day}${booked ? " — booked" : Number.isFinite(price) ? ` — $${price.toFixed(0)}` : ""}`}
+                        >
+                          <div className="font-medium">{format(new Date(d.day), "d")}</div>
+                          <div className="text-[9px] text-muted-foreground">{format(new Date(d.day), "MMM")}</div>
+                          <div className="text-[10px] mt-0.5">
+                            {booked ? "—" : Number.isFinite(price) ? `$${Math.round(price)}` : "—"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div className="py-12 text-center text-sm text-muted-foreground space-y-3">
+                  <p>No calendar data yet for this car.</p>
+                  <Button
+                    size="sm"
+                    onClick={() => triggerCalendar.mutate()}
+                    disabled={triggerCalendar.isPending}
+                  >
+                    {triggerCalendar.isPending && <Loader2 className="h-4 w-4 animate-spin mr-1" />}
+                    Fetch calendar now
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
 
