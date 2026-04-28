@@ -268,17 +268,40 @@ export default function CarDetail() {
                   </p>
                   <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
                     <PriceTile label="Now" value={car.avg_daily_price} />
-                    <PriceTile label="Next 7 days" value={(car as any).price_7d_avg} />
-                    <PriceTile label="Next 14 days" value={(car as any).price_14d_avg} />
-                    <PriceTile label="Next 30 days" value={(car as any).price_30d_avg} />
+                    <PriceTile
+                      label="Next 7 days"
+                      value={calendarAverages.d7 ?? (car as any).price_7d_avg}
+                      sub={calendarAverages.booked7 != null ? `${calendarAverages.booked7}% booked` : (calendarAverages.d7 != null ? "calendar" : "listing avg")}
+                    />
+                    <PriceTile
+                      label="Next 14 days"
+                      value={calendarAverages.d14 ?? (car as any).price_14d_avg}
+                      sub={calendarAverages.booked14 != null ? `${calendarAverages.booked14}% booked` : (calendarAverages.d14 != null ? "calendar" : "listing avg")}
+                    />
+                    <PriceTile
+                      label="Next 30 days"
+                      value={calendarAverages.d30 ?? (car as any).price_30d_avg}
+                      sub={calendarAverages.booked30 != null ? `${calendarAverages.booked30}% booked` : (calendarAverages.d30 != null ? "calendar" : "listing avg")}
+                    />
                   </div>
-                  <Button
-                    variant="outline" size="sm" className="mt-3"
-                    onClick={() => toggleWatch.mutate()}
-                  >
-                    {inWatchlist ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
-                    {inWatchlist ? "In watchlist" : "Save to watchlist"}
-                  </Button>
+                  <div className="mt-3 flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline" size="sm"
+                      onClick={() => toggleWatch.mutate()}
+                    >
+                      {inWatchlist ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                      {inWatchlist ? "In watchlist" : "Save to watchlist"}
+                    </Button>
+                    <Button
+                      variant="outline" size="sm"
+                      disabled={triggerCalendar.isPending}
+                      onClick={() => triggerCalendar.mutate()}
+                      title="Fetch 90-day availability & pricing for this car"
+                    >
+                      {triggerCalendar.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                      {calendarAverages.hasData ? "Refresh calendar" : "Fetch calendar"}
+                    </Button>
+                  </div>
                 </div>
               </div>
 
