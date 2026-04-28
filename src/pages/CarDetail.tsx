@@ -15,11 +15,12 @@ import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink, Download } f
 import { supabase } from "@/integrations/supabase/client";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 
-function PriceTile({ label, value }: { label: string; value: number | null | undefined }) {
+function PriceTile({ label, value, sub }: { label: string; value: number | null | undefined; sub?: string | null }) {
   return (
     <div className="border border-border rounded-md p-2">
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="text-sm font-semibold">{fmtUSD(value)}</div>
+      {sub && <div className="text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
     </div>
   );
 }
