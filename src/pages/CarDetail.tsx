@@ -432,6 +432,10 @@ export default function CarDetail() {
               )}
             </CardContent>
           </Card>
+
+          <Card>
+            <CardContent className="pt-4">
+              <h2 className="font-semibold mb-3">Profitability</h2>
               {profit && (
                 <dl className="text-sm space-y-1.5">
                   <Row label="Mode" value={profit.acquisitionMode === "lease" ? "Lease" : "Buy"} />
