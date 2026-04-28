@@ -359,9 +359,79 @@ export default function CarDetail() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="lg:col-span-3">
             <CardContent className="pt-4">
-              <h2 className="font-semibold mb-3">Profitability</h2>
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div>
+                  <h2 className="font-semibold">Daily availability & pricing — next 90 days</h2>
+                  <p className="text-xs text-muted-foreground">
+                    Captured directly from Turo's calendar. Greyed cells are booked/unavailable.
+                  </p>
+                </div>
+                {calendarDays && calendarDays.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {calendarDays.length} days · last captured {format(new Date(calendarDays[0].captured_on), "MMM d")}
+                  </p>
+                )}
+              </div>
+              {calendarDays && calendarDays.length > 0 ? (
+                <>
+                  <div className="h-48 mb-4">
+                    <ResponsiveContainer>
+                      <LineChart data={calendarDays.map(d => ({
+                        day: format(new Date(d.day), "MMM d"),
+                        price: d.is_available === false ? null : Number(d.daily_price) || null,
+                      }))}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
+                        <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={10} interval={6} />
+                        <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `$${v}`} />
+                        <Tooltip
+                          contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
+                          formatter={(val: any) => (val == null ? "Booked" : `$${Number(val).toFixed(0)}`)}
+                        />
+                        <Line type="monotone" dataKey="price" name="Daily price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="grid grid-cols-7 sm:grid-cols-10 md:grid-cols-15 gap-1">
+                    {calendarDays.map((d) => {
+                      const booked = d.is_available === false;
+                      const price = Number(d.daily_price);
+                      return (
+                        <div
+                          key={d.day}
+                          className={`text-center rounded-sm border px-1 py-1.5 text-[10px] ${
+                            booked
+                              ? "bg-muted/50 border-border text-muted-foreground"
+                              : "bg-card border-primary/30"
+                          }`}
+                          title={`${d.day}${booked ? " — booked" : Number.isFinite(price) ? ` — $${price.toFixed(0)}` : ""}`}
+                        >
+                          <div className="font-medium">{format(new Date(d.day), "d")}</div>
+                          <div className="text-[9px] text-muted-foreground">{format(new Date(d.day), "MMM")}</div>
+                          <div className="text-[10px] mt-0.5">
+                            {booked ? "—" : Number.isFinite(price) ? `$${Math.round(price)}` : "—"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div className="py-12 text-center text-sm text-muted-foreground space-y-3">
+                  <p>No calendar data yet for this car.</p>
+                  <Button
+                    size="sm"
+                    onClick={() => triggerCalendar.mutate()}
+                    disabled={triggerCalendar.isPending}
+                  >
+                    {triggerCalendar.isPending && <Loader2 className="h-4 w-4 animate-spin mr-1" />}
+                    Fetch calendar now
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
               {profit && (
                 <dl className="text-sm space-y-1.5">
                   <Row label="Mode" value={profit.acquisitionMode === "lease" ? "Lease" : "Buy"} />
