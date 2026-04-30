@@ -289,21 +289,40 @@ async function discoverVehicleIds(
     maxP != null ? Math.min(hi, maxP) : hi,
   ] as [number, number]);
 
+  // Build the full task list, then fan out with limited concurrency.
+  // Sequentially this loop did 9 categories × 8 buckets = 72 Zyte calls,
+  // taking 2-3 minutes — leaving no wall budget for vehicle parsing.
+  const tasks: Array<{ cat: string; lo: number; hi: number; url: string }> = [];
   for (const cat of activeCats) {
     for (const [lo, hi] of activeBuckets) {
-      const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`;
+      tasks.push({
+        cat,
+        lo,
+        hi,
+        url: `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`,
+      });
+    }
+  }
+
+  const DISCOVERY_CONCURRENCY = 8;
+  let taskIdx = 0;
+  async function discoveryWorker() {
+    while (taskIdx < tasks.length) {
+      const t = tasks[taskIdx++];
       let res;
       try {
-        res = await zyteText(url);
+        res = await zyteText(t.url, { timeoutMs: 20_000 });
       } catch (e) {
-        console.warn(`landing fetch failed: ${cat} $${lo}-${hi}`, e);
+        console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
         continue;
       }
       if (res.status !== 200) continue;
       const before = found.size;
+      // Each worker uses its OWN regex instance so the shared `cityRe.lastIndex`
+      // doesn't get clobbered across concurrent workers.
+      const localRe = new RegExp(cityRe.source, cityRe.flags);
       let m: RegExpExecArray | null;
-      cityRe.lastIndex = 0;
-      while ((m = cityRe.exec(res.body)) !== null) {
+      while ((m = localRe.exec(res.body)) !== null) {
         const [whole, type, make, model, id] = m;
         if (!found.has(id)) {
           found.set(id, {
@@ -315,9 +334,10 @@ async function discoverVehicleIds(
           });
         }
       }
-      console.log(`  ${cat} $${lo}-${hi}: +${found.size - before} (total ${found.size})`);
+      console.log(`  ${t.cat} $${t.lo}-${t.hi}: +${found.size - before} (total ${found.size})`);
     }
   }
+  await Promise.all(Array.from({ length: DISCOVERY_CONCURRENCY }, discoveryWorker));
   return [...found.values()];
 }
 
