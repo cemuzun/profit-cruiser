@@ -799,38 +799,39 @@ async function runScrape(citySlug: string) {
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
     const droppedTotal = Object.values(droppedReasons).reduce((a, b) => a + b, 0);
+    const elapsedMs = Date.now() - startMs;
     console.log(
-      `Parsed ${vehicles.length} valid vehicles (${droppedTotal} dropped by validity filters: ${
+      `Parsed ${vehicles.length} valid vehicles in ${(elapsedMs / 1000).toFixed(1)}s ` +
+      `(processed ${i}/${found.length}${stoppedEarly ? ", stopped early due to time budget" : ""}; ` +
+      `${droppedTotal} dropped by validity filters: ${
         Object.entries(droppedReasons).map(([k, n]) => `${k}=${n}`).join(", ") || "none"
       })`,
     );
 
-    if (vehicles.length) {
-      const cleaned = vehicles.map((v) =>
-        stripNulls(v, ["avg_daily_price", "rating", "completed_trips", "image_url"]),
-      );
-      const { error: upErr } = await supabase
-        .from("listings_current")
-        .upsert(cleaned, { onConflict: "vehicle_id" });
-      if (upErr) throw upErr;
+    // Final flush — persists everything not yet written by the in-loop batches.
+    await flushBatch();
 
-      const snaps = vehicles.map((v) => {
-        const { last_scraped_at, ...rest } = v;
-        return { ...rest, scraped_at: startedAt };
-      });
-      const { error: snapErr } = await supabase
-        .from("listings_snapshots")
-        .insert(snaps);
-      if (snapErr) console.error("snapshot insert:", snapErr.message);
+    // Best-effort anomaly insert (non-fatal, time-permitting).
+    if (anomalyQueue.length && Date.now() < deadlineMs + SAFETY_WINDOW_MS) {
+      const { error: anomErr } = await supabase
+        .from("price_anomalies")
+        .insert(anomalyQueue);
+      if (anomErr) console.error("anomaly insert:", anomErr.message);
     }
 
     if (runId) {
+      const finalStatus = stoppedEarly
+        ? (vehicles.length ? "partial" : "empty")
+        : (vehicles.length ? "ok" : "empty");
       await supabase
         .from("scrape_runs")
         .update({
-          status: vehicles.length ? "ok" : "empty",
+          status: finalStatus,
           vehicles_count: vehicles.length,
           finished_at: new Date().toISOString(),
+          error_message: stoppedEarly
+            ? `Stopped early: time budget reached at ${i}/${found.length} vehicles`
+            : null,
         })
         .eq("id", runId);
     }
