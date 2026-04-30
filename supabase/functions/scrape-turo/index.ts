@@ -694,8 +694,18 @@ async function runScrape(citySlug: string) {
     const YEAR_MAX = NOW_YEAR + 2; // allow next-model-year listings
 
     let i = 0;
+    // Anomalies are queued and inserted in one batch at the end (or skipped
+    // if we run out of time). Per-row inserts inside the worker were burning
+    // round-trips and contributing to CPU exhaustion.
+    const anomalyQueue: Array<Record<string, unknown>> = [];
+
     async function worker() {
       while (i < found.length) {
+        // Honor the wall-clock deadline — bail before the runtime kills us.
+        if (Date.now() > deadlineMs) {
+          stoppedEarly = true;
+          return;
+        }
         const idx = i++;
         const v = found[idx];
         try {
@@ -703,8 +713,6 @@ async function runScrape(citySlug: string) {
           if (!row) continue;
 
           // ---- Validity filters: drop incomplete / suspicious listings ----
-          // These run BEFORE user filters so anomalies are logged consistently
-          // regardless of whether the user has filters enabled.
           const missing: string[] = [];
           if (!row.make || !String(row.make).trim()) missing.push("make");
           if (!row.model || !String(row.model).trim()) missing.push("model");
@@ -712,7 +720,7 @@ async function runScrape(citySlug: string) {
           if (missing.length) {
             const reason = `missing_fields:${missing.join(",")}`;
             bumpDropped(reason);
-            await supabase.from("price_anomalies").insert({
+            anomalyQueue.push({
               vehicle_id: row.vehicle_id,
               city: citySlug,
               make: row.make ?? null,
@@ -730,7 +738,7 @@ async function runScrape(citySlug: string) {
           if (row.year != null && (row.year < YEAR_MIN || row.year > YEAR_MAX)) {
             const reason = `suspicious_year:${row.year}`;
             bumpDropped(reason);
-            await supabase.from("price_anomalies").insert({
+            anomalyQueue.push({
               vehicle_id: row.vehicle_id,
               city: citySlug,
               make: row.make ?? null,
@@ -745,15 +753,12 @@ async function runScrape(citySlug: string) {
             });
             continue;
           }
-          // Suspicious availability proxy: a listing claiming a rating but
-          // zero trips, or trips but no rating, is internally inconsistent.
-          // (Real Turo listings either have both or neither.)
           const trips = row.completed_trips ?? 0;
           const rating = row.rating ?? 0;
           if ((trips > 0 && rating === 0) || (rating > 0 && trips === 0)) {
             const reason = `inconsistent_trips_rating:trips=${trips},rating=${rating}`;
             bumpDropped(reason);
-            await supabase.from("price_anomalies").insert({
+            anomalyQueue.push({
               vehicle_id: row.vehicle_id,
               city: citySlug,
               make: row.make ?? null,
@@ -777,13 +782,16 @@ async function runScrape(citySlug: string) {
             if (filters.max_daily_price != null && row.avg_daily_price != null && row.avg_daily_price > filters.max_daily_price) continue;
             if (filters.min_trips != null && (row.completed_trips ?? 0) < filters.min_trips) continue;
             if (filters.min_rating != null && (row.rating ?? 0) < filters.min_rating) continue;
-            // Fuel filter: only enforce when listing has a known fuel_type.
-            // Listings with null fuel_type pass through (Turo doesn't always expose it).
             if (filters.fuel_types.length > 0 && row.fuel_type) {
               if (!filters.fuel_types.includes(String(row.fuel_type).toUpperCase())) continue;
             }
           }
           vehicles.push(row);
+
+          // Flush when we hit the batch threshold so partial progress is durable.
+          if (vehicles.length - flushedCount >= FLUSH_EVERY) {
+            await flushBatch();
+          }
         } catch (e) {
           console.warn(`vehicle ${v.id} error:`, e);
         }
