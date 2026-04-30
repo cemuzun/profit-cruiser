@@ -79,9 +79,14 @@ async function backupProxyText(url: string): Promise<{ status: number; body: str
 }
 
 // ---------- Zyte helpers ----------
+// Per-request timeout. Zyte itself can hang 30-40s on banned URLs (it keeps
+// retrying internally before giving up). With concurrency=3, that means a
+// single bad city can burn 2+ minutes of wall budget on one fetch. Cap at 25s.
+const ZYTE_TIMEOUT_MS = 25_000;
+
 async function zyteText(
   url: string,
-  opts: { browser?: boolean } = {},
+  opts: { browser?: boolean; timeoutMs?: number } = {},
 ): Promise<{ status: number; body: string }> {
   const reqBody: Record<string, unknown> = { url, geolocation: "US" };
   if (opts.browser) {
@@ -90,14 +95,22 @@ async function zyteText(
   } else {
     reqBody.httpResponseBody = true;
   }
-  const res = await fetch("https://api.zyte.com/v1/extract", {
-    method: "POST",
-    headers: {
-      Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(reqBody),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? ZYTE_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch("https://api.zyte.com/v1/extract", {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(reqBody),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`Zyte ${res.status} for ${url}: ${txt.slice(0, 200)}`);
