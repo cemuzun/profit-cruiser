@@ -79,9 +79,14 @@ async function backupProxyText(url: string): Promise<{ status: number; body: str
 }
 
 // ---------- Zyte helpers ----------
+// Per-request timeout. Zyte itself can hang 30-40s on banned URLs (it keeps
+// retrying internally before giving up). With concurrency=3, that means a
+// single bad city can burn 2+ minutes of wall budget on one fetch. Cap at 25s.
+const ZYTE_TIMEOUT_MS = 25_000;
+
 async function zyteText(
   url: string,
-  opts: { browser?: boolean } = {},
+  opts: { browser?: boolean; timeoutMs?: number } = {},
 ): Promise<{ status: number; body: string }> {
   const reqBody: Record<string, unknown> = { url, geolocation: "US" };
   if (opts.browser) {
@@ -90,14 +95,22 @@ async function zyteText(
   } else {
     reqBody.httpResponseBody = true;
   }
-  const res = await fetch("https://api.zyte.com/v1/extract", {
-    method: "POST",
-    headers: {
-      Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(reqBody),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? ZYTE_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch("https://api.zyte.com/v1/extract", {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(reqBody),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     const txt = await res.text();
     throw new Error(`Zyte ${res.status} for ${url}: ${txt.slice(0, 200)}`);
@@ -276,21 +289,40 @@ async function discoverVehicleIds(
     maxP != null ? Math.min(hi, maxP) : hi,
   ] as [number, number]);
 
+  // Build the full task list, then fan out with limited concurrency.
+  // Sequentially this loop did 9 categories × 8 buckets = 72 Zyte calls,
+  // taking 2-3 minutes — leaving no wall budget for vehicle parsing.
+  const tasks: Array<{ cat: string; lo: number; hi: number; url: string }> = [];
   for (const cat of activeCats) {
     for (const [lo, hi] of activeBuckets) {
-      const url = `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`;
+      tasks.push({
+        cat,
+        lo,
+        hi,
+        url: `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`,
+      });
+    }
+  }
+
+  const DISCOVERY_CONCURRENCY = 8;
+  let taskIdx = 0;
+  async function discoveryWorker() {
+    while (taskIdx < tasks.length) {
+      const t = tasks[taskIdx++];
       let res;
       try {
-        res = await zyteText(url);
+        res = await zyteText(t.url, { timeoutMs: 20_000 });
       } catch (e) {
-        console.warn(`landing fetch failed: ${cat} $${lo}-${hi}`, e);
+        console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
         continue;
       }
       if (res.status !== 200) continue;
       const before = found.size;
+      // Each worker uses its OWN regex instance so the shared `cityRe.lastIndex`
+      // doesn't get clobbered across concurrent workers.
+      const localRe = new RegExp(cityRe.source, cityRe.flags);
       let m: RegExpExecArray | null;
-      cityRe.lastIndex = 0;
-      while ((m = cityRe.exec(res.body)) !== null) {
+      while ((m = localRe.exec(res.body)) !== null) {
         const [whole, type, make, model, id] = m;
         if (!found.has(id)) {
           found.set(id, {
@@ -302,9 +334,10 @@ async function discoverVehicleIds(
           });
         }
       }
-      console.log(`  ${cat} $${lo}-${hi}: +${found.size - before} (total ${found.size})`);
+      console.log(`  ${t.cat} $${t.lo}-${t.hi}: +${found.size - before} (total ${found.size})`);
     }
   }
+  await Promise.all(Array.from({ length: DISCOVERY_CONCURRENCY }, discoveryWorker));
   return [...found.values()];
 }
 
@@ -627,12 +660,65 @@ async function runScrape(citySlug: string) {
         .eq("id", runId);
     }
 
-    // Fetch detail pages with limited concurrency
-    const CONCURRENCY = 5;
+    // Fetch detail pages with limited concurrency.
+    // Lowered from 5 → 3: Zyte was rate-limiting / banning under heavier load.
+    const CONCURRENCY = 3;
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
       droppedReasons[reason] = (droppedReasons[reason] ?? 0) + 1;
+    };
+
+    // Wall-clock deadline. Supabase edge functions have a hard CPU/wall budget
+    // (~150s wall, ~2s CPU per request burst). Stop accepting NEW vehicles ~30s
+    // before the cutoff so we have time to flush the final batch + update the
+    // run row. Without this, runs were getting killed mid-parse and stayed
+    // status="running" forever (no listings persisted).
+    const RUN_BUDGET_MS = 130_000;
+    const SAFETY_WINDOW_MS = 25_000;
+    const startMs = Date.now();
+    const deadlineMs = startMs + RUN_BUDGET_MS - SAFETY_WINDOW_MS;
+    let stoppedEarly = false;
+
+    // Incremental persist: every N rows we upsert what we have so far and
+    // bump scrape_runs.finished_at as a heartbeat. That way a forced shutdown
+    // mid-loop still leaves the DB and run row in a sane state.
+    const FLUSH_EVERY = 8;
+    let flushedCount = 0;
+    const flushBatch = async () => {
+      const pending = vehicles.slice(flushedCount);
+      if (!pending.length) return;
+      const cleaned = pending.map((v) =>
+        stripNulls(v, ["avg_daily_price", "rating", "completed_trips", "image_url"]),
+      );
+      const { error: upErr } = await supabase
+        .from("listings_current")
+        .upsert(cleaned, { onConflict: "vehicle_id" });
+      if (upErr) {
+        console.error("incremental upsert error:", upErr.message);
+        return;
+      }
+      const snaps = pending.map((v) => {
+        const { last_scraped_at, ...rest } = v;
+        return { ...rest, scraped_at: startedAt };
+      });
+      const { error: snapErr } = await supabase
+        .from("listings_snapshots")
+        .insert(snaps);
+      if (snapErr) console.error("incremental snapshot insert:", snapErr.message);
+      flushedCount = vehicles.length;
+      // Heartbeat: mark progress so the UI doesn't show "running" forever
+      // even if the function is killed before the final update.
+      if (runId) {
+        await supabase
+          .from("scrape_runs")
+          .update({
+            status: "running",
+            vehicles_count: flushedCount,
+            finished_at: new Date().toISOString(),
+          })
+          .eq("id", runId);
+      }
     };
     // Sanity bounds for year. Anything outside is almost certainly a parse
     // error (e.g. a phone-number fragment matched as a year).
@@ -641,8 +727,18 @@ async function runScrape(citySlug: string) {
     const YEAR_MAX = NOW_YEAR + 2; // allow next-model-year listings
 
     let i = 0;
+    // Anomalies are queued and inserted in one batch at the end (or skipped
+    // if we run out of time). Per-row inserts inside the worker were burning
+    // round-trips and contributing to CPU exhaustion.
+    const anomalyQueue: Array<Record<string, unknown>> = [];
+
     async function worker() {
       while (i < found.length) {
+        // Honor the wall-clock deadline — bail before the runtime kills us.
+        if (Date.now() > deadlineMs) {
+          stoppedEarly = true;
+          return;
+        }
         const idx = i++;
         const v = found[idx];
         try {
@@ -650,8 +746,6 @@ async function runScrape(citySlug: string) {
           if (!row) continue;
 
           // ---- Validity filters: drop incomplete / suspicious listings ----
-          // These run BEFORE user filters so anomalies are logged consistently
-          // regardless of whether the user has filters enabled.
           const missing: string[] = [];
           if (!row.make || !String(row.make).trim()) missing.push("make");
           if (!row.model || !String(row.model).trim()) missing.push("model");
@@ -659,7 +753,7 @@ async function runScrape(citySlug: string) {
           if (missing.length) {
             const reason = `missing_fields:${missing.join(",")}`;
             bumpDropped(reason);
-            await supabase.from("price_anomalies").insert({
+            anomalyQueue.push({
               vehicle_id: row.vehicle_id,
               city: citySlug,
               make: row.make ?? null,
@@ -677,7 +771,7 @@ async function runScrape(citySlug: string) {
           if (row.year != null && (row.year < YEAR_MIN || row.year > YEAR_MAX)) {
             const reason = `suspicious_year:${row.year}`;
             bumpDropped(reason);
-            await supabase.from("price_anomalies").insert({
+            anomalyQueue.push({
               vehicle_id: row.vehicle_id,
               city: citySlug,
               make: row.make ?? null,
@@ -692,15 +786,12 @@ async function runScrape(citySlug: string) {
             });
             continue;
           }
-          // Suspicious availability proxy: a listing claiming a rating but
-          // zero trips, or trips but no rating, is internally inconsistent.
-          // (Real Turo listings either have both or neither.)
           const trips = row.completed_trips ?? 0;
           const rating = row.rating ?? 0;
           if ((trips > 0 && rating === 0) || (rating > 0 && trips === 0)) {
             const reason = `inconsistent_trips_rating:trips=${trips},rating=${rating}`;
             bumpDropped(reason);
-            await supabase.from("price_anomalies").insert({
+            anomalyQueue.push({
               vehicle_id: row.vehicle_id,
               city: citySlug,
               make: row.make ?? null,
@@ -724,13 +815,16 @@ async function runScrape(citySlug: string) {
             if (filters.max_daily_price != null && row.avg_daily_price != null && row.avg_daily_price > filters.max_daily_price) continue;
             if (filters.min_trips != null && (row.completed_trips ?? 0) < filters.min_trips) continue;
             if (filters.min_rating != null && (row.rating ?? 0) < filters.min_rating) continue;
-            // Fuel filter: only enforce when listing has a known fuel_type.
-            // Listings with null fuel_type pass through (Turo doesn't always expose it).
             if (filters.fuel_types.length > 0 && row.fuel_type) {
               if (!filters.fuel_types.includes(String(row.fuel_type).toUpperCase())) continue;
             }
           }
           vehicles.push(row);
+
+          // Flush when we hit the batch threshold so partial progress is durable.
+          if (vehicles.length - flushedCount >= FLUSH_EVERY) {
+            await flushBatch();
+          }
         } catch (e) {
           console.warn(`vehicle ${v.id} error:`, e);
         }
@@ -738,38 +832,39 @@ async function runScrape(citySlug: string) {
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
     const droppedTotal = Object.values(droppedReasons).reduce((a, b) => a + b, 0);
+    const elapsedMs = Date.now() - startMs;
     console.log(
-      `Parsed ${vehicles.length} valid vehicles (${droppedTotal} dropped by validity filters: ${
+      `Parsed ${vehicles.length} valid vehicles in ${(elapsedMs / 1000).toFixed(1)}s ` +
+      `(processed ${i}/${found.length}${stoppedEarly ? ", stopped early due to time budget" : ""}; ` +
+      `${droppedTotal} dropped by validity filters: ${
         Object.entries(droppedReasons).map(([k, n]) => `${k}=${n}`).join(", ") || "none"
       })`,
     );
 
-    if (vehicles.length) {
-      const cleaned = vehicles.map((v) =>
-        stripNulls(v, ["avg_daily_price", "rating", "completed_trips", "image_url"]),
-      );
-      const { error: upErr } = await supabase
-        .from("listings_current")
-        .upsert(cleaned, { onConflict: "vehicle_id" });
-      if (upErr) throw upErr;
+    // Final flush — persists everything not yet written by the in-loop batches.
+    await flushBatch();
 
-      const snaps = vehicles.map((v) => {
-        const { last_scraped_at, ...rest } = v;
-        return { ...rest, scraped_at: startedAt };
-      });
-      const { error: snapErr } = await supabase
-        .from("listings_snapshots")
-        .insert(snaps);
-      if (snapErr) console.error("snapshot insert:", snapErr.message);
+    // Best-effort anomaly insert (non-fatal, time-permitting).
+    if (anomalyQueue.length && Date.now() < deadlineMs + SAFETY_WINDOW_MS) {
+      const { error: anomErr } = await supabase
+        .from("price_anomalies")
+        .insert(anomalyQueue);
+      if (anomErr) console.error("anomaly insert:", anomErr.message);
     }
 
     if (runId) {
+      const finalStatus = stoppedEarly
+        ? (vehicles.length ? "partial" : "empty")
+        : (vehicles.length ? "ok" : "empty");
       await supabase
         .from("scrape_runs")
         .update({
-          status: vehicles.length ? "ok" : "empty",
+          status: finalStatus,
           vehicles_count: vehicles.length,
           finished_at: new Date().toISOString(),
+          error_message: stoppedEarly
+            ? `Stopped early: time budget reached at ${i}/${found.length} vehicles`
+            : null,
         })
         .eq("id", runId);
     }
