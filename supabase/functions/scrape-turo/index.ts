@@ -627,12 +627,65 @@ async function runScrape(citySlug: string) {
         .eq("id", runId);
     }
 
-    // Fetch detail pages with limited concurrency
-    const CONCURRENCY = 5;
+    // Fetch detail pages with limited concurrency.
+    // Lowered from 5 → 3: Zyte was rate-limiting / banning under heavier load.
+    const CONCURRENCY = 3;
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
       droppedReasons[reason] = (droppedReasons[reason] ?? 0) + 1;
+    };
+
+    // Wall-clock deadline. Supabase edge functions have a hard CPU/wall budget
+    // (~150s wall, ~2s CPU per request burst). Stop accepting NEW vehicles ~30s
+    // before the cutoff so we have time to flush the final batch + update the
+    // run row. Without this, runs were getting killed mid-parse and stayed
+    // status="running" forever (no listings persisted).
+    const RUN_BUDGET_MS = 130_000;
+    const SAFETY_WINDOW_MS = 25_000;
+    const startMs = Date.now();
+    const deadlineMs = startMs + RUN_BUDGET_MS - SAFETY_WINDOW_MS;
+    let stoppedEarly = false;
+
+    // Incremental persist: every N rows we upsert what we have so far and
+    // bump scrape_runs.finished_at as a heartbeat. That way a forced shutdown
+    // mid-loop still leaves the DB and run row in a sane state.
+    const FLUSH_EVERY = 8;
+    let flushedCount = 0;
+    const flushBatch = async () => {
+      const pending = vehicles.slice(flushedCount);
+      if (!pending.length) return;
+      const cleaned = pending.map((v) =>
+        stripNulls(v, ["avg_daily_price", "rating", "completed_trips", "image_url"]),
+      );
+      const { error: upErr } = await supabase
+        .from("listings_current")
+        .upsert(cleaned, { onConflict: "vehicle_id" });
+      if (upErr) {
+        console.error("incremental upsert error:", upErr.message);
+        return;
+      }
+      const snaps = pending.map((v) => {
+        const { last_scraped_at, ...rest } = v;
+        return { ...rest, scraped_at: startedAt };
+      });
+      const { error: snapErr } = await supabase
+        .from("listings_snapshots")
+        .insert(snaps);
+      if (snapErr) console.error("incremental snapshot insert:", snapErr.message);
+      flushedCount = vehicles.length;
+      // Heartbeat: mark progress so the UI doesn't show "running" forever
+      // even if the function is killed before the final update.
+      if (runId) {
+        await supabase
+          .from("scrape_runs")
+          .update({
+            status: "running",
+            vehicles_count: flushedCount,
+            finished_at: new Date().toISOString(),
+          })
+          .eq("id", runId);
+      }
     };
     // Sanity bounds for year. Anything outside is almost certainly a parse
     // error (e.g. a phone-number fragment matched as a year).
