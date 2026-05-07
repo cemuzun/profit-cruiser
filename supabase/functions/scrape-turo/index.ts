@@ -524,9 +524,12 @@ async function fetchVehicle(
     }
   }
 
-  // Sanity guard: compare against previous price. Tightened from 5x to 3x
-  // because $1760→$306 (5.75x drop) is implausible for a real price change.
-  if (price != null) {
+  // Sanity guard: compare against previous price. Skipped when the new price
+  // came from a TRUSTED visible source ("$NNN/day" text or data-testid) — we
+  // trust those even on big swings, because real Turo prices have moved a lot
+  // and many old DB rows are stale by an order of magnitude.
+  const trustedSource = priceSource === "per-day-text" || priceSource === "testid" || priceSource === "ld-lowPrice";
+  if (price != null && !trustedSource) {
     const { data: prev } = await supabase
       .from("listings_current")
       .select("avg_daily_price")
@@ -548,7 +551,7 @@ async function fetchVehicle(
           attempted_price: price,
           previous_price: prevPrice,
           kept_price: prevPrice,
-          reason: `change_guard_3x (ratio=${ratio.toFixed(2)})`,
+          reason: `change_guard_3x (ratio=${ratio.toFixed(2)}, source=${priceSource})`,
           source,
           listing_url: v.href,
         });
