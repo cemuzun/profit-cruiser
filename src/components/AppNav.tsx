@@ -1,10 +1,11 @@
 import { NavLink } from "react-router-dom";
-import { BarChart3, Calculator, Bookmark, Settings, Car, CalendarRange, GitCompare, MapPin, ShieldAlert } from "lucide-react";
+import { BarChart3, Calculator, Bookmark, Settings, Car, CalendarRange, GitCompare, MapPin, ShieldAlert, Trophy } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const links = [
   { to: "/", label: "Dashboard", icon: BarChart3 },
   { to: "/cities", label: "Cities", icon: MapPin },
+  { to: "/best", label: "Best Cars", icon: Trophy },
   { to: "/analyzer", label: "Analyzer", icon: Calculator },
   { to: "/watchlist", label: "Watchlist", icon: Bookmark },
   { to: "/compare", label: "Compare", icon: GitCompare },
