@@ -492,37 +492,7 @@ async function fetchVehicle(
     priceSource = "ld-offers-price";
   }
 
-  // Class-based MIN floor — only applied when the price came from the
-  // UNTRUSTED ld.offers.price source. Trusted sources ("$NNN/day" text or
-  // data-testid) are the actual rendered daily rate and may legitimately be
-  // below the class floor (Turo's dynamic pricing has dropped a lot).
-  if (price != null && priceSource === "ld-offers-price") {
-    const makeLc = (ld.brand?.name ?? v.make ?? "").toLowerCase();
-    const minFloor = (() => {
-      if (/ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani/.test(makeLc)) return 500;
-      if (/maserati|porsche|lucid|mercedes.*amg|bmw.*m[0-9]|audi.*r[s8]/.test(makeLc)) return 150;
-      return 0;
-    })();
-    if (price < minFloor) {
-      console.warn(
-        `detail ${v.id}: price ${price} (untrusted source) below class min ${minFloor} for ${makeLc} — dropping`,
-      );
-      await supabase.from("price_anomalies").insert({
-        vehicle_id: v.id,
-        city: citySlug,
-        make: String(make ?? ""),
-        model: model ?? null,
-        year,
-        attempted_price: price,
-        previous_price: null,
-        kept_price: null,
-        reason: `below_class_min (floor=${minFloor}, source=${priceSource})`,
-        source,
-        listing_url: v.href,
-      });
-      price = null;
-    }
-  }
+  // Class-min floor removed — we want the exact scraped number, no floors.
 
   // Sanity guard: compare against previous price. Skipped when the new price
   // came from a TRUSTED visible source ("$NNN/day" text or data-testid) — we
