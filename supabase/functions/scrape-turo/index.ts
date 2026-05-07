@@ -474,9 +474,11 @@ async function fetchVehicle(
   }
 
   let price: number | null = null;
+  let priceSource = "";
   if (candidates.length > 0) {
     // Use the most-trusted candidate (first in array)
     price = candidates[0].value;
+    priceSource = candidates[0].source;
     // If ld.offers.price is wildly off from the trusted source, log it
     if (ldPriceCandidate && Math.abs(ldPriceCandidate - price) / price > 0.4) {
       console.warn(
@@ -487,12 +489,14 @@ async function fetchVehicle(
     // No trusted source available — fall back to ld.offers.price as-is.
     // No ceiling: we want the real number even for $5k+/day hyper-exotics.
     price = ldPriceCandidate;
+    priceSource = "ld-offers-price";
   }
 
-  // Class-based MIN floor — drop absurdly low prices for premium vehicles.
-  // Example: Lamborghini Urus parsed at $306/day is almost certainly a
-  // promo/deposit/wrong-element parse, not a real daily rate.
-  if (price != null) {
+  // Class-based MIN floor — only applied when the price came from the
+  // UNTRUSTED ld.offers.price source. Trusted sources ("$NNN/day" text or
+  // data-testid) are the actual rendered daily rate and may legitimately be
+  // below the class floor (Turo's dynamic pricing has dropped a lot).
+  if (price != null && priceSource === "ld-offers-price") {
     const makeLc = (ld.brand?.name ?? v.make ?? "").toLowerCase();
     const minFloor = (() => {
       if (/ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani/.test(makeLc)) return 500;
@@ -501,7 +505,7 @@ async function fetchVehicle(
     })();
     if (price < minFloor) {
       console.warn(
-        `detail ${v.id}: price ${price} below class min ${minFloor} for ${makeLc} — dropping`,
+        `detail ${v.id}: price ${price} (untrusted source) below class min ${minFloor} for ${makeLc} — dropping`,
       );
       await supabase.from("price_anomalies").insert({
         vehicle_id: v.id,
@@ -512,7 +516,7 @@ async function fetchVehicle(
         attempted_price: price,
         previous_price: null,
         kept_price: null,
-        reason: `below_class_min (floor=${minFloor})`,
+        reason: `below_class_min (floor=${minFloor}, source=${priceSource})`,
         source,
         listing_url: v.href,
       });
