@@ -308,17 +308,49 @@ async function runCalendarScrape(opts: {
     .single();
   const runId = runRow?.id as string | undefined;
 
+  // Wall-clock deadline. Edge functions get killed around 150s; leave headroom
+  // so we can write a "partial" status row before getting cut off.
+  const RUN_BUDGET_MS = 140_000;
+  const SAFETY_WINDOW_MS = 15_000;
+  const startMs = Date.now();
+  const deadline = startMs + RUN_BUDGET_MS - SAFETY_WINDOW_MS;
+
   try {
+    // Prefer vehicles whose calendar is stalest (or never captured) so each
+    // daily run advances the freshest gap first.
     let q = supabase
       .from("listings_current")
       .select("vehicle_id, city, listing_url");
     if (opts.vehicleId) q = q.eq("vehicle_id", opts.vehicleId);
     else if (opts.city) q = q.eq("city", opts.city);
-    if (opts.limit) q = q.limit(opts.limit);
+    // Cap default batch size so a single invocation finishes within the budget.
+    // Without an explicit limit a 276-vehicle run blows past the 150s timeout
+    // and the row stays "running" forever.
+    q = q.limit(opts.limit ?? 30);
     const { data: vehicles, error } = await q;
     if (error) throw error;
-    const list = vehicles ?? [];
+    let list = vehicles ?? [];
     if (!list.length) throw new Error("no vehicles to scrape");
+
+    // Re-order so vehicles with the oldest captured_on (or none) come first.
+    if (!opts.vehicleId) {
+      const ids = list.map((v) => (v as any).vehicle_id);
+      const { data: lastSeen } = await supabase
+        .from("listing_calendar_days")
+        .select("vehicle_id, captured_on")
+        .in("vehicle_id", ids)
+        .order("captured_on", { ascending: false });
+      const latest = new Map<string, string>();
+      for (const r of lastSeen ?? []) {
+        const v = (r as any).vehicle_id as string;
+        if (!latest.has(v)) latest.set(v, (r as any).captured_on as string);
+      }
+      list = list.slice().sort((a, b) => {
+        const av = latest.get((a as any).vehicle_id) ?? "";
+        const bv = latest.get((b as any).vehicle_id) ?? "";
+        return av.localeCompare(bv);
+      });
+    }
 
     // Trim returned rows to the next 90 days only — Turo's payload sometimes
     // returns a longer window than we want to store.
