@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ds, type Listing } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
@@ -15,8 +15,10 @@ import {
 } from "@/components/ui/table";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
-import { Trophy, Loader2, ExternalLink } from "lucide-react";
+import { Trophy, Loader2, ExternalLink, CalendarRange } from "lucide-react";
 import { turoCarUrl } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 type Condition =
   | "max_profit"
@@ -108,6 +110,30 @@ export default function BestCars() {
 
   const activeCondition = CONDITIONS.find((c) => c.value === condition)!;
 
+  const runCalendarAll = useMutation({
+    mutationFn: async () => {
+      const ids = ranked.map((r) => r.vehicle_id);
+      if (!ids.length) throw new Error("No cars in the current list");
+      // Fire calendar scrapes in parallel (background mode so each returns fast).
+      const results = await Promise.allSettled(
+        ids.map((vehicleId) =>
+          supabase.functions.invoke("scrape-calendar", {
+            body: { vehicleId, background: true },
+          }),
+        ),
+      );
+      const ok = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - ok;
+      return { ok, failed, total: ids.length };
+    },
+    onSuccess: ({ ok, failed, total }) => {
+      toast.success(
+        `Calendar scrape queued for ${ok}/${total} cars${failed ? ` (${failed} failed to queue)` : ""}. Refresh in ~1–2 min.`,
+      );
+    },
+    onError: (e: Error) => toast.error(e.message ?? "Failed to start calendar scrapes"),
+  });
+
   return (
     <div className="min-h-screen bg-background">
       <AppNav />
@@ -155,7 +181,20 @@ export default function BestCars() {
                 />
               </div>
             </div>
-            <p className="text-sm text-muted-foreground italic">{activeCondition.desc}</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground italic">{activeCondition.desc}</p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => runCalendarAll.mutate()}
+                disabled={runCalendarAll.isPending || ranked.length === 0}
+              >
+                {runCalendarAll.isPending
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <CalendarRange className="h-4 w-4" />}
+                Run calendar for all ({ranked.length})
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
