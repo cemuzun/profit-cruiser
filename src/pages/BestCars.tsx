@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { ds, type Listing } from "@/lib/dataSource";
 import { AppNav } from "@/components/AppNav";
@@ -15,8 +15,10 @@ import {
 } from "@/components/ui/table";
 import { useGlobalCosts } from "@/hooks/useGlobalCosts";
 import { computeProfit, fmtUSD, fmtPct, verdict } from "@/lib/profitability";
-import { Trophy, Loader2, ExternalLink } from "lucide-react";
+import { Trophy, Loader2, ExternalLink, CalendarRange } from "lucide-react";
 import { turoCarUrl } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
 
 type Condition =
   | "max_profit"
