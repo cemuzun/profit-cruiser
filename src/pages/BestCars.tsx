@@ -221,7 +221,16 @@ export default function BestCars() {
                           </TableCell>
                           <TableCell>
                             <Button asChild variant="ghost" size="sm">
-                              <a href={turoCarUrl(r.vehicle_id)} target="_blank" rel="noreferrer">
+                              <a
+                                href={turoCarUrl(r.vehicle_id, (r as any).listing_url, {
+                                  city: r.location_city ?? r.city,
+                                  make: r.make,
+                                  model: r.model,
+                                  vehicle_type: r.vehicle_type,
+                                })}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
                                 <ExternalLink className="h-4 w-4" />
                               </a>
                             </Button>
