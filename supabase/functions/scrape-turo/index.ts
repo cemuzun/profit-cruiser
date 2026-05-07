@@ -893,7 +893,40 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const city = String(body?.city ?? "").trim();
     const vehicleId = String(body?.vehicleId ?? "").trim();
+    const probe = !!body?.probe;
     const all = !!body?.all || (!city && !vehicleId);
+
+    if (probe && vehicleId) {
+      const { data: existing } = await supabase
+        .from("listings_current")
+        .select("listing_url")
+        .eq("vehicle_id", vehicleId)
+        .single();
+      const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
+      const r = await zyteText(href);
+      const html = r.body;
+      const ld = extractLdProduct(html);
+      const samples: Record<string, string[]> = {};
+      const grab = (tag: string, re: RegExp, n = 5) => {
+        re.lastIndex = 0; const out: string[] = []; let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) !== null && out.length < n) out.push(m[0].slice(0, 200));
+        samples[tag] = out;
+      };
+      grab("per-day", /\$\s*[\d,]+(?:\.\d+)?\s*(?:\/\s*day|per\s+day)/gi);
+      grab("dailyPrice", /"dailyPrice"\s*:\s*[^,}]+/gi);
+      grab("lowPrice", /"lowPrice"\s*:\s*[^,}]+/gi);
+      grab("priceJson", /"price"\s*:\s*[\d.]+/gi);
+      grab("dataTestPrice", /data-testid=["'][^"']*price[^"']*["'][^>]{0,200}/gi);
+      grab("offers", /"offers"\s*:\s*\{[^}]{0,400}/gi);
+      grab("amount", /"amount"\s*:\s*[\d.]+/gi);
+      return new Response(JSON.stringify({
+        status: r.status, html_len: html.length,
+        ld_offers: ld?.offers ?? null,
+        ld_name: ld?.name ?? null,
+        samples,
+      }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
 
     // Targeted single-vehicle refresh: re-fetch one listing and upsert.
     if (vehicleId) {
