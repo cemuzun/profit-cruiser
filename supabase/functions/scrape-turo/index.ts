@@ -474,9 +474,11 @@ async function fetchVehicle(
   }
 
   let price: number | null = null;
+  let priceSource = "";
   if (candidates.length > 0) {
     // Use the most-trusted candidate (first in array)
     price = candidates[0].value;
+    priceSource = candidates[0].source;
     // If ld.offers.price is wildly off from the trusted source, log it
     if (ldPriceCandidate && Math.abs(ldPriceCandidate - price) / price > 0.4) {
       console.warn(
@@ -487,12 +489,14 @@ async function fetchVehicle(
     // No trusted source available — fall back to ld.offers.price as-is.
     // No ceiling: we want the real number even for $5k+/day hyper-exotics.
     price = ldPriceCandidate;
+    priceSource = "ld-offers-price";
   }
 
-  // Class-based MIN floor — drop absurdly low prices for premium vehicles.
-  // Example: Lamborghini Urus parsed at $306/day is almost certainly a
-  // promo/deposit/wrong-element parse, not a real daily rate.
-  if (price != null) {
+  // Class-based MIN floor — only applied when the price came from the
+  // UNTRUSTED ld.offers.price source. Trusted sources ("$NNN/day" text or
+  // data-testid) are the actual rendered daily rate and may legitimately be
+  // below the class floor (Turo's dynamic pricing has dropped a lot).
+  if (price != null && priceSource === "ld-offers-price") {
     const makeLc = (ld.brand?.name ?? v.make ?? "").toLowerCase();
     const minFloor = (() => {
       if (/ferrari|lamborghini|mclaren|bentley|rolls|aston|bugatti|koenigsegg|pagani/.test(makeLc)) return 500;
@@ -501,7 +505,7 @@ async function fetchVehicle(
     })();
     if (price < minFloor) {
       console.warn(
-        `detail ${v.id}: price ${price} below class min ${minFloor} for ${makeLc} — dropping`,
+        `detail ${v.id}: price ${price} (untrusted source) below class min ${minFloor} for ${makeLc} — dropping`,
       );
       await supabase.from("price_anomalies").insert({
         vehicle_id: v.id,
@@ -512,7 +516,7 @@ async function fetchVehicle(
         attempted_price: price,
         previous_price: null,
         kept_price: null,
-        reason: `below_class_min (floor=${minFloor})`,
+        reason: `below_class_min (floor=${minFloor}, source=${priceSource})`,
         source,
         listing_url: v.href,
       });
@@ -520,9 +524,12 @@ async function fetchVehicle(
     }
   }
 
-  // Sanity guard: compare against previous price. Tightened from 5x to 3x
-  // because $1760→$306 (5.75x drop) is implausible for a real price change.
-  if (price != null) {
+  // Sanity guard: compare against previous price. Skipped when the new price
+  // came from a TRUSTED visible source ("$NNN/day" text or data-testid) — we
+  // trust those even on big swings, because real Turo prices have moved a lot
+  // and many old DB rows are stale by an order of magnitude.
+  const trustedSource = priceSource === "per-day-text" || priceSource === "testid" || priceSource === "ld-lowPrice";
+  if (price != null && !trustedSource) {
     const { data: prev } = await supabase
       .from("listings_current")
       .select("avg_daily_price")
@@ -544,7 +551,7 @@ async function fetchVehicle(
           attempted_price: price,
           previous_price: prevPrice,
           kept_price: prevPrice,
-          reason: `change_guard_3x (ratio=${ratio.toFixed(2)})`,
+          reason: `change_guard_3x (ratio=${ratio.toFixed(2)}, source=${priceSource})`,
           source,
           listing_url: v.href,
         });
@@ -893,7 +900,40 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const city = String(body?.city ?? "").trim();
     const vehicleId = String(body?.vehicleId ?? "").trim();
+    const probe = !!body?.probe;
     const all = !!body?.all || (!city && !vehicleId);
+
+    if (probe && vehicleId) {
+      const { data: existing } = await supabase
+        .from("listings_current")
+        .select("listing_url")
+        .eq("vehicle_id", vehicleId)
+        .single();
+      const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
+      const r = await zyteText(href);
+      const html = r.body;
+      const ld = extractLdProduct(html);
+      const samples: Record<string, string[]> = {};
+      const grab = (tag: string, re: RegExp, n = 5) => {
+        re.lastIndex = 0; const out: string[] = []; let m: RegExpExecArray | null;
+        while ((m = re.exec(html)) !== null && out.length < n) out.push(m[0].slice(0, 200));
+        samples[tag] = out;
+      };
+      grab("per-day", /\$\s*[\d,]+(?:\.\d+)?\s*(?:\/\s*day|per\s+day)/gi);
+      grab("dailyPrice", /"dailyPrice"\s*:\s*[^,}]+/gi);
+      grab("lowPrice", /"lowPrice"\s*:\s*[^,}]+/gi);
+      grab("priceJson", /"price"\s*:\s*[\d.]+/gi);
+      grab("dataTestPrice", /data-testid=["'][^"']*price[^"']*["'][^>]{0,200}/gi);
+      grab("offers", /"offers"\s*:\s*\{[^}]{0,400}/gi);
+      grab("amount", /"amount"\s*:\s*[\d.]+/gi);
+      return new Response(JSON.stringify({
+        status: r.status, html_len: html.length,
+        ld_offers: ld?.offers ?? null,
+        ld_name: ld?.name ?? null,
+        samples,
+      }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
 
     // Targeted single-vehicle refresh: re-fetch one listing and upsert.
     if (vehicleId) {
