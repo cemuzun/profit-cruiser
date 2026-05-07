@@ -492,7 +492,64 @@ async function fetchVehicle(
     priceSource = "ld-offers-price";
   }
 
-  // Class-min floor removed — we want the exact scraped number, no floors.
+  // RETRY for unmeaningful data: if price is missing OR came from the
+  // untrusted ld.offers.price source, retry with JS-rendered browserHtml
+  // to capture the real "$NNN/day" text. Alert if retry also fails.
+  const isUnmeaningful = price == null || priceSource === "ld-offers-price";
+  if (isUnmeaningful) {
+    console.warn(`detail ${v.id}: unmeaningful price (source=${priceSource || "none"}) — retrying with browser render`);
+    try {
+      const r2 = await zyteText(v.href, { browser: true, timeoutMs: 35_000 });
+      if (r2.status === 200 && !isBlockedPage(r2.body)) {
+        const dailyMatch2 = r2.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/\s*day|per\s+day)/i);
+        const testIdMatch2 = r2.body.match(/data-testid=["'](?:search-result-price|vehicle-price|daily-price)["'][^>]*>\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
+        const m2 = dailyMatch2 ?? testIdMatch2;
+        if (m2) {
+          const n = parseFloat(m2[1].replace(/,/g, ""));
+          if (Number.isFinite(n) && n >= HARD_MIN_DAILY && n <= HARD_MAX_DAILY) {
+            console.log(`detail ${v.id}: browser retry recovered $${n}/day (was ${priceSource}=${price})`);
+            const prevAttempt = price;
+            price = n;
+            priceSource = dailyMatch2 ? "per-day-text-browser" : "testid-browser";
+            // Log the retry as an anomaly so it's auditable
+            await supabase.from("price_anomalies").insert({
+              vehicle_id: v.id,
+              city: citySlug,
+              make: String(make ?? ""),
+              model: model ?? null,
+              year,
+              attempted_price: prevAttempt,
+              previous_price: null,
+              kept_price: n,
+              reason: `unmeaningful_price_recovered_via_browser`,
+              source: priceSource,
+              listing_url: v.href,
+            });
+          }
+        }
+      }
+      // Still no trusted price? Alert.
+      if (price == null || priceSource === "ld-offers-price") {
+        await supabase.from("price_anomalies").insert({
+          vehicle_id: v.id,
+          city: citySlug,
+          make: String(make ?? ""),
+          model: model ?? null,
+          year,
+          attempted_price: price,
+          previous_price: null,
+          kept_price: null,
+          reason: `unmeaningful_price_no_trusted_source (source=${priceSource || "none"})`,
+          source: priceSource || source,
+          listing_url: v.href,
+        });
+        // Drop the price rather than save junk — keep DB clean.
+        if (priceSource === "ld-offers-price") price = null;
+      }
+    } catch (e) {
+      console.warn(`detail ${v.id}: browser retry threw:`, e);
+    }
+  }
 
   // Sanity guard: compare against previous price. Skipped when the new price
   // came from a TRUSTED visible source ("$NNN/day" text or data-testid) — we
