@@ -308,17 +308,49 @@ async function runCalendarScrape(opts: {
     .single();
   const runId = runRow?.id as string | undefined;
 
+  // Wall-clock deadline. Edge functions get killed around 150s; leave headroom
+  // so we can write a "partial" status row before getting cut off.
+  const RUN_BUDGET_MS = 140_000;
+  const SAFETY_WINDOW_MS = 15_000;
+  const startMs = Date.now();
+  const deadline = startMs + RUN_BUDGET_MS - SAFETY_WINDOW_MS;
+
   try {
+    // Prefer vehicles whose calendar is stalest (or never captured) so each
+    // daily run advances the freshest gap first.
     let q = supabase
       .from("listings_current")
       .select("vehicle_id, city, listing_url");
     if (opts.vehicleId) q = q.eq("vehicle_id", opts.vehicleId);
     else if (opts.city) q = q.eq("city", opts.city);
-    if (opts.limit) q = q.limit(opts.limit);
+    // Cap default batch size so a single invocation finishes within the budget.
+    // Without an explicit limit a 276-vehicle run blows past the 150s timeout
+    // and the row stays "running" forever.
+    q = q.limit(opts.limit ?? 30);
     const { data: vehicles, error } = await q;
     if (error) throw error;
-    const list = vehicles ?? [];
+    let list = vehicles ?? [];
     if (!list.length) throw new Error("no vehicles to scrape");
+
+    // Re-order so vehicles with the oldest captured_on (or none) come first.
+    if (!opts.vehicleId) {
+      const ids = list.map((v) => (v as any).vehicle_id);
+      const { data: lastSeen } = await supabase
+        .from("listing_calendar_days")
+        .select("vehicle_id, captured_on")
+        .in("vehicle_id", ids)
+        .order("captured_on", { ascending: false });
+      const latest = new Map<string, string>();
+      for (const r of lastSeen ?? []) {
+        const v = (r as any).vehicle_id as string;
+        if (!latest.has(v)) latest.set(v, (r as any).captured_on as string);
+      }
+      list = list.slice().sort((a, b) => {
+        const av = latest.get((a as any).vehicle_id) ?? "";
+        const bv = latest.get((b as any).vehicle_id) ?? "";
+        return av.localeCompare(bv);
+      });
+    }
 
     // Trim returned rows to the next 90 days only — Turo's payload sometimes
     // returns a longer window than we want to store.
@@ -334,8 +366,10 @@ async function runCalendarScrape(opts: {
     // so we don't burn through the Zyte rate limit on a 1k-vehicle batch.
     const CONCURRENCY = 3;
     let i = 0;
+    let stoppedEarly = false;
     async function worker() {
       while (i < list.length) {
+        if (Date.now() > deadline) { stoppedEarly = true; break; }
         const idx = i++;
         const v = list[idx] as { vehicle_id: string; city: string | null; listing_url: string | null };
         try {
@@ -370,9 +404,9 @@ async function runCalendarScrape(opts: {
       await supabase
         .from("calendar_scrape_runs")
         .update({
-          status: okCount > 0 ? "ok" : "empty",
+          status: stoppedEarly ? "partial" : (okCount > 0 ? "ok" : "empty"),
           finished_at: new Date().toISOString(),
-          vehicles_attempted: list.length,
+          vehicles_attempted: i,
           vehicles_ok: okCount,
           vehicles_failed: failCount,
           source_api_count: xhrCount,
@@ -382,12 +416,13 @@ async function runCalendarScrape(opts: {
     }
     return {
       ok: true,
-      attempted: list.length,
+      attempted: i,
       ok_count: okCount,
       fail_count: failCount,
       xhr_count: xhrCount,
       html_count: htmlCount,
       window_days: WINDOW_DAYS,
+      stopped_early: stoppedEarly,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
