@@ -366,8 +366,10 @@ async function runCalendarScrape(opts: {
     // so we don't burn through the Zyte rate limit on a 1k-vehicle batch.
     const CONCURRENCY = 3;
     let i = 0;
+    let stoppedEarly = false;
     async function worker() {
       while (i < list.length) {
+        if (Date.now() > deadline) { stoppedEarly = true; break; }
         const idx = i++;
         const v = list[idx] as { vehicle_id: string; city: string | null; listing_url: string | null };
         try {
@@ -402,9 +404,9 @@ async function runCalendarScrape(opts: {
       await supabase
         .from("calendar_scrape_runs")
         .update({
-          status: okCount > 0 ? "ok" : "empty",
+          status: stoppedEarly ? "partial" : (okCount > 0 ? "ok" : "empty"),
           finished_at: new Date().toISOString(),
-          vehicles_attempted: list.length,
+          vehicles_attempted: i,
           vehicles_ok: okCount,
           vehicles_failed: failCount,
           source_api_count: xhrCount,
@@ -414,12 +416,13 @@ async function runCalendarScrape(opts: {
     }
     return {
       ok: true,
-      attempted: list.length,
+      attempted: i,
       ok_count: okCount,
       fail_count: failCount,
       xhr_count: xhrCount,
       html_count: htmlCount,
       window_days: WINDOW_DAYS,
+      stopped_early: stoppedEarly,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
