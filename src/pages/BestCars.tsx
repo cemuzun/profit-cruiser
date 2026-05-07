@@ -181,7 +181,20 @@ export default function BestCars() {
                 />
               </div>
             </div>
-            <p className="text-sm text-muted-foreground italic">{activeCondition.desc}</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground italic">{activeCondition.desc}</p>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => runCalendarAll.mutate()}
+                disabled={runCalendarAll.isPending || ranked.length === 0}
+              >
+                {runCalendarAll.isPending
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <CalendarRange className="h-4 w-4" />}
+                Run calendar for all ({ranked.length})
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
