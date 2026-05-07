@@ -12,6 +12,7 @@ import Seasonality from "./pages/Seasonality.tsx";
 import Compare from "./pages/Compare.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import Cities from "./pages/Cities.tsx";
+import BestCars from "./pages/BestCars.tsx";
 import Admin from "./pages/Admin.tsx";
 
 const queryClient = new QueryClient();
@@ -25,6 +26,7 @@ const App = () => (
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/cities" element={<Cities />} />
+          <Route path="/best" element={<BestCars />} />
           <Route path="/car/:id" element={<CarDetail />} />
           <Route path="/analyzer" element={<Analyzer />} />
           <Route path="/watchlist" element={<Watchlist />} />
