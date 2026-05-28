@@ -335,6 +335,7 @@ async function runCalendarScrape(opts: {
       .from("listings_current")
       .select("vehicle_id, city, listing_url, last_scraped_at");
     if (opts.vehicleId) q = q.eq("vehicle_id", opts.vehicleId);
+    else if (opts.vehicleIds?.length) q = q.in("vehicle_id", opts.vehicleIds);
     else if (opts.city) q = q.eq("city", opts.city);
     else {
       // Only batch vehicles re-confirmed in the last 7 days.
