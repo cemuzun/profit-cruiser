@@ -70,7 +70,7 @@ function HistoryTable({ rows }: { rows: HistoryRow[] }) {
               <TableHead className="h-8 px-3 text-xs">Date</TableHead>
               <TableHead className="h-8 px-3 text-xs text-right">Listing $/day</TableHead>
               <TableHead className="h-8 px-3 text-xs text-right">30d cal avg</TableHead>
-              <TableHead className="h-8 px-3 text-xs text-right">Utilization</TableHead>
+              <TableHead className="h-8 px-3 text-xs text-right">Util % (last 30d)</TableHead>
               <TableHead className="h-8 px-3 text-xs text-right">Trips</TableHead>
             </TableRow>
           </TableHeader>
