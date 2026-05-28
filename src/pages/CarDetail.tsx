@@ -27,6 +27,69 @@ function PriceTile({ label, value, sub }: { label: string; value: number | null 
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { VerdictBadge } from "./Dashboard";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+
+type HistoryRow = { day: string; ts: number; price?: number; trips?: number; utilization?: number; avg30?: number };
+
+function HistoryTable({ rows }: { rows: HistoryRow[] }) {
+  const sorted = useMemo(() => [...rows].sort((a, b) => b.ts - a.ts), [rows]);
+  if (!sorted.length) return null;
+
+  const downloadCsv = () => {
+    const header = ["Date", "Listing price", "30d cal avg", "Utilization %", "Completed trips"];
+    const lines = [header.join(",")];
+    for (const r of sorted) {
+      lines.push([
+        format(new Date(r.ts), "yyyy-MM-dd"),
+        r.price ?? "",
+        r.avg30 != null ? r.avg30.toFixed(2) : "",
+        r.utilization ?? "",
+        r.trips ?? "",
+      ].join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `car-history-${sorted[0]?.ts ?? Date.now()}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="mt-4">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-semibold">Daily data — listing price & utilization</h3>
+        <Button variant="outline" size="sm" onClick={downloadCsv}>
+          <Download className="h-3.5 w-3.5 mr-1" /> CSV
+        </Button>
+      </div>
+      <div className="border border-border rounded-md max-h-80 overflow-auto">
+        <Table>
+          <TableHeader className="sticky top-0 bg-muted/80 backdrop-blur">
+            <TableRow>
+              <TableHead className="h-8 px-3 text-xs">Date</TableHead>
+              <TableHead className="h-8 px-3 text-xs text-right">Listing $/day</TableHead>
+              <TableHead className="h-8 px-3 text-xs text-right">30d cal avg</TableHead>
+              <TableHead className="h-8 px-3 text-xs text-right">Utilization</TableHead>
+              <TableHead className="h-8 px-3 text-xs text-right">Trips</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sorted.map((r) => (
+              <TableRow key={r.ts}>
+                <TableCell className="py-1.5 px-3 text-xs font-mono">{format(new Date(r.ts), "yyyy-MM-dd")}</TableCell>
+                <TableCell className="py-1.5 px-3 text-xs text-right tabular-nums">{r.price != null ? fmtUSD(r.price) : "—"}</TableCell>
+                <TableCell className="py-1.5 px-3 text-xs text-right tabular-nums">{r.avg30 != null ? fmtUSD(r.avg30) : "—"}</TableCell>
+                <TableCell className="py-1.5 px-3 text-xs text-right tabular-nums">{r.utilization != null ? `${r.utilization}%` : "—"}</TableCell>
+                <TableCell className="py-1.5 px-3 text-xs text-right tabular-nums">{r.trips ?? "—"}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 
 export default function CarDetail() {
   const { id } = useParams();
