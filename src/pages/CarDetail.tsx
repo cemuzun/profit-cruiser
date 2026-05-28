@@ -14,6 +14,10 @@ import { turoCarUrl } from "@/lib/utils";
 import { ArrowLeft, Bookmark, BookmarkCheck, Loader2, ExternalLink, Download } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
+import { format } from "date-fns";
+import { toast } from "sonner";
+import { VerdictBadge } from "./Dashboard";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 
 function PriceTile({ label, value, sub }: { label: string; value: number | null | undefined; sub?: string | null }) {
   return (
@@ -24,10 +28,7 @@ function PriceTile({ label, value, sub }: { label: string; value: number | null 
     </div>
   );
 }
-import { format } from "date-fns";
-import { toast } from "sonner";
-import { VerdictBadge } from "./Dashboard";
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+
 
 type HistoryRow = { day: string; ts: number; price?: number; trips?: number; utilization?: number; avg30?: number };
 
