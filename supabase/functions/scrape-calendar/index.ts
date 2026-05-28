@@ -245,8 +245,15 @@ async function tryBrowserCalendar(
   vehicleId: string,
   city: string | null,
   listingUrl: string | null,
+  opts: { startDate?: string; endDate?: string } = {},
 ): Promise<{ rows: DayRow[]; usedSource: "xhr" | "html" | "none" }> {
-  const href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
+  let href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
+  // If a pickup/return window is provided, append it to the listing URL so
+  // Turo's booking widget hydrates the calendar XHR for that exact window.
+  if (opts.startDate && opts.endDate) {
+    const sep = href.includes("?") ? "&" : "?";
+    href = `${href}${sep}startDate=${encodeURIComponent(opts.startDate)}&endDate=${encodeURIComponent(opts.endDate)}`;
+  }
   const r = await zyteFetch(href, {
     browser: true,
     captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
