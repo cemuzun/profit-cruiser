@@ -317,20 +317,26 @@ async function runCalendarScrape(opts: {
 
   try {
     // Prefer vehicles whose calendar is stalest (or never captured) so each
-    // daily run advances the freshest gap first.
+    // daily run advances the freshest gap first. IMPORTANT: only consider
+    // vehicles confirmed alive by the listing scraper recently — otherwise
+    // we keep retrying delisted LA/Honolulu vehicles from weeks ago and the
+    // entire batch fails 100%.
     let q = supabase
       .from("listings_current")
-      .select("vehicle_id, city, listing_url");
+      .select("vehicle_id, city, listing_url, last_scraped_at");
     if (opts.vehicleId) q = q.eq("vehicle_id", opts.vehicleId);
     else if (opts.city) q = q.eq("city", opts.city);
-    // Cap default batch size so a single invocation finishes within the budget.
-    // Without an explicit limit a 276-vehicle run blows past the 150s timeout
-    // and the row stays "running" forever.
+    else {
+      // Only batch vehicles re-confirmed in the last 7 days.
+      const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      q = q.gte("last_scraped_at", cutoff);
+    }
     q = q.limit(opts.limit ?? 30);
     const { data: vehicles, error } = await q;
     if (error) throw error;
     let list = vehicles ?? [];
     if (!list.length) throw new Error("no vehicles to scrape");
+
 
     // Re-order so vehicles with the oldest captured_on (or none) come first.
     if (!opts.vehicleId) {
