@@ -245,8 +245,15 @@ async function tryBrowserCalendar(
   vehicleId: string,
   city: string | null,
   listingUrl: string | null,
+  opts: { startDate?: string; endDate?: string } = {},
 ): Promise<{ rows: DayRow[]; usedSource: "xhr" | "html" | "none" }> {
-  const href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
+  let href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
+  // If a pickup/return window is provided, append it to the listing URL so
+  // Turo's booking widget hydrates the calendar XHR for that exact window.
+  if (opts.startDate && opts.endDate) {
+    const sep = href.includes("?") ? "&" : "?";
+    href = `${href}${sep}startDate=${encodeURIComponent(opts.startDate)}&endDate=${encodeURIComponent(opts.endDate)}`;
+  }
   const r = await zyteFetch(href, {
     browser: true,
     captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
@@ -298,7 +305,10 @@ function parseInlineCalendarFromHtml(
 async function runCalendarScrape(opts: {
   city?: string;
   vehicleId?: string;
+  vehicleIds?: string[];
   limit?: number;
+  startDate?: string;
+  endDate?: string;
 }) {
   const startedAt = new Date().toISOString();
   const { data: runRow } = await supabase
@@ -325,6 +335,7 @@ async function runCalendarScrape(opts: {
       .from("listings_current")
       .select("vehicle_id, city, listing_url, last_scraped_at");
     if (opts.vehicleId) q = q.eq("vehicle_id", opts.vehicleId);
+    else if (opts.vehicleIds?.length) q = q.in("vehicle_id", opts.vehicleIds);
     else if (opts.city) q = q.eq("city", opts.city);
     else {
       // Only batch vehicles re-confirmed in the last 7 days.
@@ -380,7 +391,10 @@ async function runCalendarScrape(opts: {
         const v = list[idx] as { vehicle_id: string; city: string | null; listing_url: string | null };
         try {
           const { rows: rawRows, usedSource } =
-            await tryBrowserCalendar(v.vehicle_id, v.city, v.listing_url);
+            await tryBrowserCalendar(v.vehicle_id, v.city, v.listing_url, {
+              startDate: opts.startDate,
+              endDate: opts.endDate,
+            });
           const rows = rawRows.filter((r) => validDays.has(r.day));
           if (rows.length === 0) {
             failCount++;
@@ -453,9 +467,16 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const city = body?.city ? String(body.city) : undefined;
     const vehicleId = body?.vehicleId ? String(body.vehicleId) : undefined;
+    const vehicleIds = Array.isArray(body?.vehicleIds)
+      ? body.vehicleIds.map((x: unknown) => String(x)).filter(Boolean)
+      : undefined;
     const limit = body?.limit ? Number(body.limit) : undefined;
     const background = !!body?.background;
     const probe = !!body?.probe;
+    const isoDate = (s: unknown) =>
+      typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
+    const startDate = isoDate(body?.startDate);
+    const endDate = isoDate(body?.endDate);
 
     // Probe mode: browser-render the canonical listing URL and dump every JSON
     // segment that smells like calendar/availability data. Used to bootstrap
@@ -534,13 +555,13 @@ Deno.serve(async (req) => {
 
     if (background) {
       // @ts-ignore EdgeRuntime is provided by Supabase runtime
-      EdgeRuntime.waitUntil(runCalendarScrape({ city, vehicleId, limit }));
+      EdgeRuntime.waitUntil(runCalendarScrape({ city, vehicleId, vehicleIds, limit, startDate, endDate }));
       return new Response(JSON.stringify({ ok: true, queued: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const r = await runCalendarScrape({ city, vehicleId, limit });
+    const r = await runCalendarScrape({ city, vehicleId, vehicleIds, limit, startDate, endDate });
     return new Response(JSON.stringify(r), {
       status: r.ok ? 200 : 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
