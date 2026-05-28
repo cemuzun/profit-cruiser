@@ -305,7 +305,10 @@ function parseInlineCalendarFromHtml(
 async function runCalendarScrape(opts: {
   city?: string;
   vehicleId?: string;
+  vehicleIds?: string[];
   limit?: number;
+  startDate?: string;
+  endDate?: string;
 }) {
   const startedAt = new Date().toISOString();
   const { data: runRow } = await supabase
