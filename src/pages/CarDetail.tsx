@@ -489,7 +489,7 @@ export default function CarDetail() {
                       <Legend wrapperStyle={{ fontSize: 11 }} />
                       <Line yAxisId="price" type="monotone" dataKey="price" name="Listing price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls />
                       <Line yAxisId="price" type="monotone" dataKey="avg30" name="30d cal. avg" stroke="hsl(var(--accent))" strokeWidth={2} strokeDasharray="4 3" dot={false} connectNulls />
-                      <Line yAxisId="util" type="monotone" dataKey="utilization" name="Utilization %" stroke="hsl(var(--warning))" strokeWidth={2} dot={false} connectNulls />
+                      <Line yAxisId="util" type="monotone" dataKey="utilization" name="Booked % (last 30d)" stroke="hsl(var(--warning))" strokeWidth={2} dot={false} connectNulls />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
