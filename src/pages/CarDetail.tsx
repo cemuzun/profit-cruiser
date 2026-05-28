@@ -124,8 +124,9 @@ export default function CarDetail() {
     enabled: !!id,
   });
 
-  // Utilization history: how % booked over the next 30 days changed across each
-  // calendar capture. Built from listing_calendar_days grouped by captured_on.
+  // Backward-looking utilization: for each capture date, what % of the last 30
+  // actual days (ending on that date) were booked? Uses the most recent scrape
+  // observation available for each calendar day.
   const { data: utilizationHistory } = useQuery({
     queryKey: ["car-utilization-history", id],
     queryFn: async () => {
@@ -136,29 +137,67 @@ export default function CarDetail() {
         .order("captured_on", { ascending: true })
         .limit(10000);
       if (error) throw error;
+
       const byCapture = new Map<string, { day: string; is_available: boolean | null; daily_price: number | null }[]>();
       for (const r of (data ?? []) as any[]) {
         const arr = byCapture.get(r.captured_on) ?? [];
         arr.push(r);
         byCapture.set(r.captured_on, arr);
       }
+
+      // Index by day → capture → row for backward-looking lookup
+      const byDay = new Map<string, Map<string, { is_available: boolean | null; daily_price: number | null }>>();
+      for (const r of (data ?? []) as any[]) {
+        if (!byDay.has(r.day)) byDay.set(r.day, new Map());
+        byDay.get(r.day)!.set(r.captured_on, { is_available: r.is_available, daily_price: r.daily_price });
+      }
+
+      const MS_PER_DAY = 86400000;
+
       return Array.from(byCapture.entries())
         .map(([captured_on, rows]) => {
+          // Forward-looking: avg price for next 30 days (for chart avg30 line)
           const fwd = rows
             .filter((r) => r.day >= captured_on)
             .sort((a, b) => a.day.localeCompare(b.day))
             .slice(0, 30);
-          if (!fwd.length) return null;
-          const booked = fwd.filter((r) => r.is_available === false).length;
-          const prices = fwd.map((r) => Number(r.daily_price)).filter((n) => Number.isFinite(n) && n > 0);
-          const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : null;
+          const fwdPrices = fwd.map((r) => Number(r.daily_price)).filter((n) => Number.isFinite(n) && n > 0);
+          const avgPrice30 = fwdPrices.length ? fwdPrices.reduce((a, b) => a + b, 0) / fwdPrices.length : null;
+
+          // Backward-looking: how many of last 30 actual days were booked?
+          const endTs = new Date(captured_on + "T00:00:00").getTime();
+          const startTs = endTs - 29 * MS_PER_DAY;
+          let booked = 0;
+          let observed = 0;
+          for (let ts = startTs; ts <= endTs; ts += MS_PER_DAY) {
+            const dayStr = new Date(ts).toISOString().slice(0, 10);
+            const dayCaptures = byDay.get(dayStr);
+            if (!dayCaptures) continue;
+
+            let bestCap: string | null = null;
+            let bestRow: { is_available: boolean | null; daily_price: number | null } | null = null;
+            for (const [capOn, row] of dayCaptures.entries()) {
+              if (capOn <= dayStr && (!bestCap || capOn > bestCap)) {
+                bestCap = capOn;
+                bestRow = row;
+              }
+            }
+            if (!bestRow) continue;
+
+            observed++;
+            if (bestRow.is_available === false) booked++;
+          }
+
+          if (observed === 0) return null;
           return {
             captured_on,
-            utilization_pct: Math.round((booked / fwd.length) * 100),
-            avg_price_30d: avgPrice,
+            utilization_pct: Math.round((booked / observed) * 100),
+            booked_days: booked,
+            observed_days: observed,
+            avg_price_30d: avgPrice30,
           };
         })
-        .filter(Boolean) as { captured_on: string; utilization_pct: number; avg_price_30d: number | null }[];
+        .filter(Boolean) as { captured_on: string; utilization_pct: number; booked_days: number; observed_days: number; avg_price_30d: number | null }[];
     },
     enabled: !!id,
   });
