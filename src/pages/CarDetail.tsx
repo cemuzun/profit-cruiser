@@ -368,20 +368,31 @@ export default function CarDetail() {
                 </div>
               </div>
 
-              <div className="h-56 mt-4">
+              <div className="flex items-center justify-between mt-4 mb-1">
+                <h3 className="text-sm font-semibold">Historical price & utilization</h3>
+                <p className="text-[11px] text-muted-foreground">
+                  {snapshotCount} price snapshot{snapshotCount === 1 ? "" : "s"} · {captureCount} calendar capture{captureCount === 1 ? "" : "s"}
+                </p>
+              </div>
+              <div className="h-56">
                 {chartData.length > 1 ? (
                   <ResponsiveContainer>
                     <LineChart data={chartData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                       <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={11} />
-                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                      <YAxis yAxisId="price" stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `$${v}`} />
+                      <YAxis yAxisId="util" orientation="right" stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
                       <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }} />
-                      <Line type="monotone" dataKey="price" name="Daily price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      <Line yAxisId="price" type="monotone" dataKey="price" name="Listing price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls />
+                      <Line yAxisId="price" type="monotone" dataKey="avg30" name="30d cal. avg" stroke="hsl(var(--accent))" strokeWidth={2} strokeDasharray="4 3" dot={false} connectNulls />
+                      <Line yAxisId="util" type="monotone" dataKey="utilization" name="Utilization %" stroke="hsl(var(--warning))" strokeWidth={2} dot={false} connectNulls />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
-                    Need 2+ snapshots to show trend
+                  <div className="h-full flex flex-col items-center justify-center text-sm text-muted-foreground text-center px-4">
+                    <p>Only {snapshotCount} price snapshot and {captureCount} calendar capture so far.</p>
+                    <p className="text-xs mt-1">Daily scrapes will fill in the trend — check back tomorrow, or click "Refresh calendar" above to add a capture now.</p>
                   </div>
                 )}
               </div>
