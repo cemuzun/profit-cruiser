@@ -467,9 +467,16 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const city = body?.city ? String(body.city) : undefined;
     const vehicleId = body?.vehicleId ? String(body.vehicleId) : undefined;
+    const vehicleIds = Array.isArray(body?.vehicleIds)
+      ? body.vehicleIds.map((x: unknown) => String(x)).filter(Boolean)
+      : undefined;
     const limit = body?.limit ? Number(body.limit) : undefined;
     const background = !!body?.background;
     const probe = !!body?.probe;
+    const isoDate = (s: unknown) =>
+      typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
+    const startDate = isoDate(body?.startDate);
+    const endDate = isoDate(body?.endDate);
 
     // Probe mode: browser-render the canonical listing URL and dump every JSON
     // segment that smells like calendar/availability data. Used to bootstrap
