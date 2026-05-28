@@ -1,0 +1,2 @@
+ALTER PUBLICATION supabase_realtime ADD TABLE public.calendar_scrape_runs;
+ALTER PUBLICATION supabase_realtime ADD TABLE public.listing_calendar_days;

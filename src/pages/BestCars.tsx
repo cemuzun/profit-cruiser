@@ -267,11 +267,43 @@ export default function BestCars() {
     if (!pollUntil) return;
     const tick = () => {
       qc.invalidateQueries({ queryKey: ["best-cars-window"] });
+      qc.invalidateQueries({ queryKey: ["best-cars-ranked"] });
       if (Date.now() > pollUntil) setPollUntil(null);
     };
     const id = setInterval(tick, 20_000);
     return () => clearInterval(id);
   }, [pollUntil, qc]);
+
+  // Realtime: invalidate rankings the moment new calendar rows land or a
+  // calendar scrape run flips to success/error. Triggers refresh whether the
+  // scrape was kicked off here, by cron, or from another tab.
+  useEffect(() => {
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const bump = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["best-cars-window"] });
+        qc.invalidateQueries({ queryKey: ["best-cars-ranked"] });
+      }, 1500);
+    };
+    const channel = supabase
+      .channel("best-cars-live")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "listing_calendar_days" }, bump)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "calendar_scrape_runs" },
+        (payload) => {
+          const status = (payload.new as { status?: string } | null)?.status;
+          if (status && status !== "running") bump();
+        },
+      )
+      .subscribe();
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      supabase.removeChannel(channel);
+    };
+  }, [qc]);
+
 
   const runCalendarAll = useMutation({
     mutationFn: async () => {
