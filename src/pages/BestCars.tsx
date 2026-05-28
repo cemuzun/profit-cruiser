@@ -103,19 +103,28 @@ export default function BestCars() {
   const { data: listings, isLoading } = useQuery({
     queryKey: ["listings-current"],
     queryFn: async () => ds.listings(),
-  });
-
   // Pre-rank from listings only (no calendar yet) — used to pick which vehicle
   // IDs to load calendar windows for. Avoids fetching calendar for thousands.
   const preRanked = useMemo(() => {
     if (!listings || !globalCosts) return [];
     let rows: Listing[] = listings;
+    // Only include cars whose city is still in the active cities list — once a
+    // city is removed in Settings it should disappear from rankings even if old
+    // listings_current rows remain in the DB.
+    if (cityList && cityList.length) {
+      const activeSlugs = new Set(cityList.map((c) => c.slug));
+      rows = rows.filter((l) => activeSlugs.has(l.city));
+    }
     if (city !== "all") rows = rows.filter((l) => l.city === city);
     const withProfit = rows
       .map((l) => ({ ...l, profit: computeProfit(l as any, globalCosts) }))
       .filter((r) => r.profit.monthlyProfit > 0);
     // Sort by listing profit for the candidate pool; final ranking re-sorts.
     withProfit.sort((a, b) => b.profit.monthlyProfit - a.profit.monthlyProfit);
+    const n = Math.max(1, Math.min(200, (Number(limit) || 20) * 3));
+    return withProfit.slice(0, n);
+  }, [listings, globalCosts, city, limit, cityList]);
+
     const n = Math.max(1, Math.min(200, (Number(limit) || 20) * 3));
     return withProfit.slice(0, n);
   }, [listings, globalCosts, city, limit]);
