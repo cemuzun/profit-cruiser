@@ -45,10 +45,56 @@ export default function CarDetail() {
   const { data: history } = useQuery({
     queryKey: ["car-history", id],
     queryFn: async () => {
-      const snaps = await ds.snapshots();
-      return snaps
-        .filter((s) => s.vehicle_id === id)
-        .sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
+      // Pull ALL snapshots for THIS vehicle directly (server-side filter).
+      // The old code fetched every vehicle's history through ds.snapshots()
+      // and capped at 1000 rows, which dropped most of the daily trend.
+      const { data, error } = await supabase
+        .from("listings_snapshots")
+        .select("vehicle_id, avg_daily_price, completed_trips, rating, scraped_at")
+        .eq("vehicle_id", id!)
+        .order("scraped_at", { ascending: true })
+        .limit(1000);
+      if (error) throw error;
+      return data ?? [];
+    },
+    enabled: !!id,
+  });
+
+  // Utilization history: how % booked over the next 30 days changed across each
+  // calendar capture. Built from listing_calendar_days grouped by captured_on.
+  const { data: utilizationHistory } = useQuery({
+    queryKey: ["car-utilization-history", id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("listing_calendar_days")
+        .select("day, is_available, daily_price, captured_on")
+        .eq("vehicle_id", id!)
+        .order("captured_on", { ascending: true })
+        .limit(10000);
+      if (error) throw error;
+      const byCapture = new Map<string, { day: string; is_available: boolean | null; daily_price: number | null }[]>();
+      for (const r of (data ?? []) as any[]) {
+        const arr = byCapture.get(r.captured_on) ?? [];
+        arr.push(r);
+        byCapture.set(r.captured_on, arr);
+      }
+      return Array.from(byCapture.entries())
+        .map(([captured_on, rows]) => {
+          const fwd = rows
+            .filter((r) => r.day >= captured_on)
+            .sort((a, b) => a.day.localeCompare(b.day))
+            .slice(0, 30);
+          if (!fwd.length) return null;
+          const booked = fwd.filter((r) => r.is_available === false).length;
+          const prices = fwd.map((r) => Number(r.daily_price)).filter((n) => Number.isFinite(n) && n > 0);
+          const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : null;
+          return {
+            captured_on,
+            utilization_pct: Math.round((booked / fwd.length) * 100),
+            avg_price_30d: avgPrice,
+          };
+        })
+        .filter(Boolean) as { captured_on: string; utilization_pct: number; avg_price_30d: number | null }[];
     },
     enabled: !!id,
   });
