@@ -391,7 +391,10 @@ async function runCalendarScrape(opts: {
         const v = list[idx] as { vehicle_id: string; city: string | null; listing_url: string | null };
         try {
           const { rows: rawRows, usedSource } =
-            await tryBrowserCalendar(v.vehicle_id, v.city, v.listing_url);
+            await tryBrowserCalendar(v.vehicle_id, v.city, v.listing_url, {
+              startDate: opts.startDate,
+              endDate: opts.endDate,
+            });
           const rows = rawRows.filter((r) => validDays.has(r.day));
           if (rows.length === 0) {
             failCount++;
