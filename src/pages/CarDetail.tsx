@@ -450,7 +450,7 @@ export default function CarDetail() {
                       sub={calendarAverages.booked30 != null ? `${calendarAverages.booked30}% booked` : (calendarAverages.d30 != null ? "calendar" : "listing avg")}
                     />
                   </div>
-                  <div className="mt-3 flex gap-2 flex-wrap">
+                      <Line yAxisId="util" type="monotone" dataKey="utilization" name="Booked % (last 30d)" stroke="hsl(var(--warning))" strokeWidth={2} dot={false} connectNulls />
                     <Button
                       variant="outline" size="sm"
                       onClick={() => toggleWatch.mutate()}
