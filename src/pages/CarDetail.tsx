@@ -396,8 +396,11 @@ export default function CarDetail() {
                   </div>
                 )}
               </div>
+
+              <HistoryTable rows={chartData} />
             </CardContent>
           </Card>
+
 
           <Card className="lg:col-span-3">
             <CardContent className="pt-4">
