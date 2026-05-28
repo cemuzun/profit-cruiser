@@ -103,6 +103,8 @@ export default function BestCars() {
   const { data: listings, isLoading } = useQuery({
     queryKey: ["listings-current"],
     queryFn: async () => ds.listings(),
+  });
+
   // Pre-rank from listings only (no calendar yet) — used to pick which vehicle
   // IDs to load calendar windows for. Avoids fetching calendar for thousands.
   const preRanked = useMemo(() => {
@@ -119,15 +121,11 @@ export default function BestCars() {
     const withProfit = rows
       .map((l) => ({ ...l, profit: computeProfit(l as any, globalCosts) }))
       .filter((r) => r.profit.monthlyProfit > 0);
-    // Sort by listing profit for the candidate pool; final ranking re-sorts.
     withProfit.sort((a, b) => b.profit.monthlyProfit - a.profit.monthlyProfit);
     const n = Math.max(1, Math.min(200, (Number(limit) || 20) * 3));
     return withProfit.slice(0, n);
   }, [listings, globalCosts, city, limit, cityList]);
 
-    const n = Math.max(1, Math.min(200, (Number(limit) || 20) * 3));
-    return withProfit.slice(0, n);
-  }, [listings, globalCosts, city, limit]);
 
   const candidateIds = useMemo(() => preRanked.map((r) => r.vehicle_id), [preRanked]);
 
