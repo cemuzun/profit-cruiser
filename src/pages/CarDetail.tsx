@@ -263,11 +263,28 @@ export default function CarDetail() {
   }
 
   const v = profit ? verdict(profit) : null;
-  const chartData = (history ?? []).map((h: any) => ({
-    day: format(new Date(h.scraped_at), "MMM d"),
-    price: Number(h.avg_daily_price) || 0,
-    trips: h.completed_trips ?? 0,
-  }));
+
+  // Merge daily price snapshots + utilization captures into one chart series.
+  const histMap = new Map<string, { day: string; ts: number; price?: number; trips?: number; utilization?: number; avg30?: number }>();
+  for (const h of (history ?? []) as any[]) {
+    const d = new Date(h.scraped_at);
+    const key = format(d, "yyyy-MM-dd");
+    const row = histMap.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
+    row.price = Number(h.avg_daily_price) || undefined;
+    row.trips = h.completed_trips ?? undefined;
+    histMap.set(key, row);
+  }
+  for (const u of (utilizationHistory ?? [])) {
+    const d = new Date(u.captured_on);
+    const key = format(d, "yyyy-MM-dd");
+    const row = histMap.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
+    row.utilization = u.utilization_pct;
+    row.avg30 = u.avg_price_30d ?? undefined;
+    histMap.set(key, row);
+  }
+  const chartData = Array.from(histMap.values()).sort((a, b) => a.ts - b.ts);
+  const snapshotCount = (history ?? []).length;
+  const captureCount = (utilizationHistory ?? []).length;
 
   return (
     <div className="min-h-screen bg-background">
