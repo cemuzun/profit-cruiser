@@ -555,13 +555,13 @@ Deno.serve(async (req) => {
 
     if (background) {
       // @ts-ignore EdgeRuntime is provided by Supabase runtime
-      EdgeRuntime.waitUntil(runCalendarScrape({ city, vehicleId, limit }));
+      EdgeRuntime.waitUntil(runCalendarScrape({ city, vehicleId, vehicleIds, limit, startDate, endDate }));
       return new Response(JSON.stringify({ ok: true, queued: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const r = await runCalendarScrape({ city, vehicleId, limit });
+    const r = await runCalendarScrape({ city, vehicleId, vehicleIds, limit, startDate, endDate });
     return new Response(JSON.stringify(r), {
       status: r.ok ? 200 : 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
