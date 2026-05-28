@@ -45,10 +45,56 @@ export default function CarDetail() {
   const { data: history } = useQuery({
     queryKey: ["car-history", id],
     queryFn: async () => {
-      const snaps = await ds.snapshots();
-      return snaps
-        .filter((s) => s.vehicle_id === id)
-        .sort((a, b) => a.scraped_at.localeCompare(b.scraped_at));
+      // Pull ALL snapshots for THIS vehicle directly (server-side filter).
+      // The old code fetched every vehicle's history through ds.snapshots()
+      // and capped at 1000 rows, which dropped most of the daily trend.
+      const { data, error } = await supabase
+        .from("listings_snapshots")
+        .select("vehicle_id, avg_daily_price, completed_trips, rating, scraped_at")
+        .eq("vehicle_id", id!)
+        .order("scraped_at", { ascending: true })
+        .limit(1000);
+      if (error) throw error;
+      return data ?? [];
+    },
+    enabled: !!id,
+  });
+
+  // Utilization history: how % booked over the next 30 days changed across each
+  // calendar capture. Built from listing_calendar_days grouped by captured_on.
+  const { data: utilizationHistory } = useQuery({
+    queryKey: ["car-utilization-history", id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("listing_calendar_days")
+        .select("day, is_available, daily_price, captured_on")
+        .eq("vehicle_id", id!)
+        .order("captured_on", { ascending: true })
+        .limit(10000);
+      if (error) throw error;
+      const byCapture = new Map<string, { day: string; is_available: boolean | null; daily_price: number | null }[]>();
+      for (const r of (data ?? []) as any[]) {
+        const arr = byCapture.get(r.captured_on) ?? [];
+        arr.push(r);
+        byCapture.set(r.captured_on, arr);
+      }
+      return Array.from(byCapture.entries())
+        .map(([captured_on, rows]) => {
+          const fwd = rows
+            .filter((r) => r.day >= captured_on)
+            .sort((a, b) => a.day.localeCompare(b.day))
+            .slice(0, 30);
+          if (!fwd.length) return null;
+          const booked = fwd.filter((r) => r.is_available === false).length;
+          const prices = fwd.map((r) => Number(r.daily_price)).filter((n) => Number.isFinite(n) && n > 0);
+          const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : null;
+          return {
+            captured_on,
+            utilization_pct: Math.round((booked / fwd.length) * 100),
+            avg_price_30d: avgPrice,
+          };
+        })
+        .filter(Boolean) as { captured_on: string; utilization_pct: number; avg_price_30d: number | null }[];
     },
     enabled: !!id,
   });
@@ -217,11 +263,28 @@ export default function CarDetail() {
   }
 
   const v = profit ? verdict(profit) : null;
-  const chartData = (history ?? []).map((h: any) => ({
-    day: format(new Date(h.scraped_at), "MMM d"),
-    price: Number(h.avg_daily_price) || 0,
-    trips: h.completed_trips ?? 0,
-  }));
+
+  // Merge daily price snapshots + utilization captures into one chart series.
+  const histMap = new Map<string, { day: string; ts: number; price?: number; trips?: number; utilization?: number; avg30?: number }>();
+  for (const h of (history ?? []) as any[]) {
+    const d = new Date(h.scraped_at);
+    const key = format(d, "yyyy-MM-dd");
+    const row = histMap.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
+    row.price = Number(h.avg_daily_price) || undefined;
+    row.trips = h.completed_trips ?? undefined;
+    histMap.set(key, row);
+  }
+  for (const u of (utilizationHistory ?? [])) {
+    const d = new Date(u.captured_on);
+    const key = format(d, "yyyy-MM-dd");
+    const row = histMap.get(key) ?? { day: format(d, "MMM d"), ts: d.getTime() };
+    row.utilization = u.utilization_pct;
+    row.avg30 = u.avg_price_30d ?? undefined;
+    histMap.set(key, row);
+  }
+  const chartData = Array.from(histMap.values()).sort((a, b) => a.ts - b.ts);
+  const snapshotCount = (history ?? []).length;
+  const captureCount = (utilizationHistory ?? []).length;
 
   return (
     <div className="min-h-screen bg-background">
@@ -305,20 +368,31 @@ export default function CarDetail() {
                 </div>
               </div>
 
-              <div className="h-56 mt-4">
+              <div className="flex items-center justify-between mt-4 mb-1">
+                <h3 className="text-sm font-semibold">Historical price & utilization</h3>
+                <p className="text-[11px] text-muted-foreground">
+                  {snapshotCount} price snapshot{snapshotCount === 1 ? "" : "s"} · {captureCount} calendar capture{captureCount === 1 ? "" : "s"}
+                </p>
+              </div>
+              <div className="h-56">
                 {chartData.length > 1 ? (
                   <ResponsiveContainer>
                     <LineChart data={chartData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                       <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={11} />
-                      <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                      <YAxis yAxisId="price" stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `$${v}`} />
+                      <YAxis yAxisId="util" orientation="right" stroke="hsl(var(--muted-foreground))" fontSize={11} tickFormatter={(v) => `${v}%`} domain={[0, 100]} />
                       <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }} />
-                      <Line type="monotone" dataKey="price" name="Daily price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      <Line yAxisId="price" type="monotone" dataKey="price" name="Listing price" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} connectNulls />
+                      <Line yAxisId="price" type="monotone" dataKey="avg30" name="30d cal. avg" stroke="hsl(var(--accent))" strokeWidth={2} strokeDasharray="4 3" dot={false} connectNulls />
+                      <Line yAxisId="util" type="monotone" dataKey="utilization" name="Utilization %" stroke="hsl(var(--warning))" strokeWidth={2} dot={false} connectNulls />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : (
-                  <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
-                    Need 2+ snapshots to show trend
+                  <div className="h-full flex flex-col items-center justify-center text-sm text-muted-foreground text-center px-4">
+                    <p>Only {snapshotCount} price snapshot and {captureCount} calendar capture so far.</p>
+                    <p className="text-xs mt-1">Daily scrapes will fill in the trend — check back tomorrow, or click "Refresh calendar" above to add a capture now.</p>
                   </div>
                 )}
               </div>
