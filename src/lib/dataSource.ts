@@ -275,6 +275,64 @@ async function setAnomalyReviewed(id: string, reviewed: boolean) {
   if (error) throw error;
 }
 
+// Real occupancy per vehicle from the scraped Turo calendar.
+// Looks at the next `windowDays` future days and computes the share that are
+// booked (is_available === false), de-duping to the most recent capture per day.
+export type Occupancy = { occupancyPct: number; observedDays: number };
+
+async function fetchOccupancyByVehicle(windowDays = 30): Promise<Record<string, Occupancy>> {
+  const today = new Date().toISOString().slice(0, 10);
+  const end = new Date(Date.now() + windowDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  const pageSize = 1000;
+  let from = 0;
+  type Row = { vehicle_id: string; day: string; is_available: boolean | null; captured_on: string };
+  const rows: Row[] = [];
+  // Paginate so we don't silently truncate at 1000 rows.
+  for (;;) {
+    const { data, error } = await supabase
+      .from("listing_calendar_days")
+      .select("vehicle_id, day, is_available, captured_on")
+      .gte("day", today)
+      .lte("day", end)
+      .range(from, from + pageSize - 1);
+    if (error) throw error;
+    const batch = (data ?? []) as Row[];
+    rows.push(...batch);
+    if (batch.length < pageSize) break;
+    from += pageSize;
+  }
+
+  // De-dup: per vehicle+day keep the most recent capture.
+  const latest = new Map<string, Row>();
+  for (const r of rows) {
+    const key = `${r.vehicle_id}|${r.day}`;
+    const existing = latest.get(key);
+    if (!existing || r.captured_on > existing.captured_on) latest.set(key, r);
+  }
+
+  const agg = new Map<string, { booked: number; observed: number }>();
+  for (const r of latest.values()) {
+    if (r.is_available == null) continue; // unknown — don't count
+    const a = agg.get(r.vehicle_id) ?? { booked: 0, observed: 0 };
+    a.observed += 1;
+    if (r.is_available === false) a.booked += 1;
+    agg.set(r.vehicle_id, a);
+  }
+
+  const out: Record<string, Occupancy> = {};
+  for (const [vehicle_id, a] of agg) {
+    if (a.observed === 0) continue;
+    out[vehicle_id] = {
+      occupancyPct: Math.round((a.booked / a.observed) * 100),
+      observedDays: a.observed,
+    };
+  }
+  return out;
+}
+
 export const ds = {
   listings: () => fetchAllListings(),
   snapshots: () => fetchSnapshots(),
