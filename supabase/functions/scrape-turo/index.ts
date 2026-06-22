@@ -78,6 +78,63 @@ async function backupProxyText(url: string): Promise<{ status: number; body: str
   }
 }
 
+// ---------- Firecrawl scraper (PRIMARY, permanent, no proxy bandwidth) ----------
+// Firecrawl handles Turo's Cloudflare/WAF + JS rendering for us. One scrape of a
+// search-results page returns up to ~200 fully-rendered vehicle cards (name,
+// year, rating, trips, host badge, location, image and trip-total price), so we
+// never fetch per-vehicle detail pages. Cost is Firecrawl credits only — zero
+// residential-proxy GB. This is the cheap, provider-independent path.
+const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
+
+// Fixed trip window used for every search URL so the trip-total price → daily
+// price conversion is consistent across listings. A short window minimizes
+// Turo's multi-day discount distortion.
+const TRIP_DAYS = 3;
+function tripWindow(): { start: string; end: string; days: number } {
+  const fmt = (d: Date) =>
+    `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+  const start = new Date(Date.now() + 14 * 86400_000);
+  const end = new Date(start.getTime() + TRIP_DAYS * 86400_000);
+  return { start: fmt(start), end: fmt(end), days: TRIP_DAYS };
+}
+
+async function firecrawlText(
+  url: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ status: number; body: string }> {
+  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 60_000);
+  try {
+    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["html"],
+        onlyMainContent: false,
+        waitFor: 9000,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { status: res.status, body: "" };
+    }
+    const data = await res.json();
+    const html = (data?.data?.html ?? data?.html ?? "") as string;
+    return { status: 200, body: html };
+  } catch (e) {
+    console.warn(`firecrawl threw for ${url}:`, e instanceof Error ? e.message : String(e));
+    return { status: 0, body: "" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---------- Apify SuperScraper helpers ----------
 // We use Apify's SuperScraper API (apify/super-scraper-api), a drop-in
 // ScrapingBee-compatible HTML scraper running in standby mode (no per-request
@@ -225,18 +282,21 @@ type ParsedVehicle = {
 const titleCase = (s: string) =>
   s.replace(/\b\w/g, (c) => c.toUpperCase());
 
-// Parse a single vehicle-card chunk from a Turo listing page into a row.
-// All the data we need is rendered server-side in the card:
-//   href (type/make/model/id), image alt ("Make Model YEAR in City, ST"),
-//   "$NNN/day" price, and an optional "Rating: N out of 5 stars" + "(trips)".
-function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
+// Parse a single vehicle-card chunk from a Firecrawl-rendered Turo search page.
+// The fully hydrated card contains everything we need as visible text:
+//   href (type/make/model/id), image alt ("Make Model YEAR"),
+//   rating + (trips), "All-Star Host" badge, location + distance, and a
+//   trip-TOTAL price (e.g. "$958 total" for the fixed `tripDays` window).
+// We convert the trip total to a daily price by dividing by `tripDays`.
+function parseCard(chunk: string, citySlug: string, tripDays: number): ParsedVehicle | null {
   const hrefM = chunk.match(
-    /href="(https:\/\/turo\.com\/us\/en\/([a-z0-9-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8}))"/,
+    /href="(https:\/\/turo\.com\/us\/en\/([a-z0-9-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8}))/,
   );
   if (!hrefM) return null;
-  const [, href, typeSlug, makeSlug, modelSlug, id] = hrefM;
+  const [, hrefRaw, typeSlug, makeSlug, modelSlug, id] = hrefM;
+  const href = hrefRaw.split("?")[0];
 
-  // Image + alt text ("Chevrolet Corvette 2026 in Miami, FL").
+  // Image + alt text ("Mercedes-Benz GLE-Class 2024").
   const imgM = chunk.match(/<img[^>]+alt="([^"]*)"[^>]+src="(https:\/\/images\.turo\.com[^"]+)"/) ??
     chunk.match(/<img[^>]+src="(https:\/\/images\.turo\.com[^"]+)"[^>]+alt="([^"]*)"/);
   let alt = "";
@@ -246,23 +306,47 @@ function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
     else { alt = imgM[2] ?? ""; image = imgM[1]; }
   }
 
-  // Year: from alt (" 2026 in ") or any 4-digit year in the card.
-  const yearM = alt.match(/\b(19|20)\d{2}\b/) ?? chunk.match(/>(\b(?:19|20)\d{2})<\/p>/);
-  const year = yearM ? parseInt(yearM[0].replace(/[^\d]/g, ""), 10) : null;
+  // Strip tags -> normalized visible text stream for the card.
+  const text = chunk
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  // Location from alt ("... in Miami, FL").
-  const locM = alt.match(/ in ([^,<]+),\s*([A-Z]{2})/);
+  // Year: from alt first ("... 2024"), else from the text stream.
+  const yearM = alt.match(/\b(19|20)\d{2}\b/) ?? text.match(/\b(19|20)\d{2}\b/);
+  const year = yearM ? parseInt(yearM[0], 10) : null;
 
-  // Price: "$201</span><span ...>/day".
-  const priceM = chunk.match(/\$\s*([\d,]+)\s*<\/span>\s*<span[^>]*>\s*\/day/i) ??
-    chunk.match(/\$\s*([\d,]+)[^<]*<[^>]*>\s*\/day/i);
-  const price = priceM ? parseInt(priceM[1].replace(/,/g, ""), 10) : null;
-
-  // Rating + trips.
-  const ratingM = chunk.match(/Rating:\s*([\d.]+)\s*out of 5/i);
+  // Rating: standalone "4.93" style number (0-5 with decimals).
+  const ratingM = text.match(/\b([0-5]\.\d{1,2})\b/);
   const rating = ratingM ? parseFloat(ratingM[1]) : null;
-  const tripsM = chunk.match(/\((\d+)\)\s*<\/p>/);
+
+  // Trips: "(65)".
+  const tripsM = text.match(/\((\d{1,5})\)/);
   const trips = tripsM ? parseInt(tripsM[1], 10) : (rating != null ? 0 : null);
+
+  // All-Star Host badge.
+  const isAllStar = /All-Star Host/i.test(text);
+
+  // Location + distance: "... • Miami • 9.4 mi". The city sits between a
+  // bullet and the distance; strip the host badge first so it isn't captured.
+  const locText = text.replace(/All-Star Host/gi, " ").replace(/\s+/g, " ");
+  const locM = locText.match(/[•·]\s*([A-Za-z][A-Za-z .'-]*?)\s*[•·]\s*[\d.]+\s*mi\b/);
+  const locationCity = locM ? locM[1].trim() : null;
+
+  // Price: trip TOTAL ("$958 total") → daily = total / tripDays.
+  // Prefer the discounted "$N total"; fall back to the styled total-price span.
+  let total: number | null = null;
+  const totalM = text.match(/\$\s*([\d,]+)\s*total/i);
+  if (totalM) {
+    total = parseInt(totalM[1].replace(/,/g, ""), 10);
+  } else {
+    const spanM = chunk.match(/StyledText-TotalPrice[^>]*>\s*\$\s*([\d,]+)/i);
+    if (spanM) total = parseInt(spanM[1].replace(/,/g, ""), 10);
+  }
+  const price = total != null && tripDays > 0 ? Math.round(total / tripDays) : null;
 
   const make = makeSlug.replace(/-/g, " ");
   const model = modelSlug.replace(/-/g, " ");
@@ -280,13 +364,13 @@ function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
     currency: "USD",
     completed_trips: trips,
     rating,
-    is_all_star_host: false,
+    is_all_star_host: isAllStar,
     host_id: null,
     host_name: null,
     image_url: image,
     listing_url: href,
-    location_city: locM ? locM[1].trim() : null,
-    location_state: locM ? locM[2] : null,
+    location_city: locationCity,
+    location_state: null,
     latitude: null,
     longitude: null,
     last_scraped_at: new Date().toISOString(),
@@ -314,47 +398,61 @@ async function discoverVehicleIds(
 
   const minP = filters?.min_daily_price ?? null;
   const maxP = filters?.max_daily_price ?? null;
-  const activeBuckets = PRICE_BUCKETS.filter(([lo, hi]) => {
-    if (minP != null && hi <= minP) return false;
-    if (maxP != null && lo >= maxP) return false;
-    return true;
-  }).map(([lo, hi]) => [
-    minP != null ? Math.max(lo, minP) : lo,
-    maxP != null ? Math.min(hi, maxP) : hi,
-  ] as [number, number]);
 
-  const tasks: Array<{ cat: string; lo: number; hi: number; url: string }> = [];
+  // Firecrawl renders the full search page (~200 cards each), so a single
+  // request per category usually covers the city's inventory. We only fall back
+  // to price-bucket splitting when the user set an explicit price filter
+  // (so the URL constrains results) — this keeps Firecrawl credit usage low.
+  const { start, end, days } = tripWindow();
+  const buckets: Array<[number | null, number | null]> = (minP != null || maxP != null)
+    ? [[minP, maxP]]
+    : [[null, null]];
+
+  const tasks: Array<{ cat: string; lo: number | null; hi: number | null; url: string }> = [];
   for (const cat of activeCats) {
-    for (const [lo, hi] of activeBuckets) {
+    for (const [lo, hi] of buckets) {
+      const params = new URLSearchParams({
+        startDate: start,
+        startTime: "10:00",
+        endDate: end,
+        endTime: "10:00",
+      });
+      if (lo != null) params.set("minDailyPrice", String(lo));
+      if (hi != null) params.set("maxDailyPrice", String(hi));
       tasks.push({
         cat,
         lo,
         hi,
-        url: `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`,
+        url: `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?${params.toString()}`,
       });
     }
   }
 
-  const DISCOVERY_CONCURRENCY = 16;
+  // Firecrawl renders are slow (~10s each); keep concurrency modest to stay
+  // within the edge wall budget while not hammering the Firecrawl plan.
+  const DISCOVERY_CONCURRENCY = 5;
   let taskIdx = 0;
   async function discoveryWorker() {
     while (taskIdx < tasks.length) {
       const t = tasks[taskIdx++];
       let res;
       try {
-        res = await apifyText(t.url, { timeoutMs: 25_000 });
+        res = await firecrawlText(t.url, { timeoutMs: 60_000 });
       } catch (e) {
-        console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
+        console.warn(`firecrawl fetch failed: ${t.cat}`, e instanceof Error ? e.message : String(e));
         continue;
       }
-      if (res.status !== 200) continue;
+      if (res.status !== 200 || !res.body) {
+        console.warn(`firecrawl ${t.cat}: status=${res.status} empty=${!res.body}`);
+        continue;
+      }
       const before = found.size;
       const chunks = res.body.split(CARD_SPLIT).slice(1);
       for (const chunk of chunks) {
-        const row = parseCard(chunk, citySlug);
+        const row = parseCard(chunk, citySlug, days);
         if (row && !found.has(row.vehicle_id)) found.set(row.vehicle_id, row);
       }
-      console.log(`  ${t.cat} $${t.lo}-${t.hi}: +${found.size - before} (total ${found.size})`);
+      console.log(`  ${t.cat}: +${found.size - before} (total ${found.size})`);
     }
   }
   await Promise.all(Array.from({ length: DISCOVERY_CONCURRENCY }, discoveryWorker));
