@@ -497,11 +497,15 @@ async function fetchVehicle(
   // RETRY for unmeaningful data: if price is missing OR came from the
   // untrusted ld.offers.price source, retry with JS-rendered browserHtml
   // to capture the real "$NNN/day" text. Alert if retry also fails.
+  // The browser render is expensive (~10-35s via Apify). Only attempt it when
+  // there's still comfortable wall-clock budget left, so a slow retry doesn't
+  // get the whole function killed mid-run and lose unflushed vehicles.
   const isUnmeaningful = price == null || priceSource === "ld-offers-price";
-  if (isUnmeaningful) {
+  const hasBudgetForBrowser = Date.now() < detailDeadlineMs - 40_000;
+  if (isUnmeaningful && hasBudgetForBrowser) {
     console.warn(`detail ${v.id}: unmeaningful price (source=${priceSource || "none"}) — retrying with browser render`);
     try {
-      const r2 = await zyteText(v.href, { browser: true, timeoutMs: 35_000 });
+      const r2 = await apifyText(v.href, { browser: true, timeoutMs: 35_000 });
       if (r2.status === 200 && !isBlockedPage(r2.body)) {
         const dailyMatch2 = r2.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/\s*day|per\s+day)/i);
         const testIdMatch2 = r2.body.match(/data-testid=["'](?:search-result-price|vehicle-price|daily-price)["'][^>]*>\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
