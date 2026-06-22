@@ -56,6 +56,7 @@ export default function Dashboard() {
   const [cityFilter, setCityFilter] = useState("");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
+  const [minActualOcc, setMinActualOcc] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("profit");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
@@ -151,6 +152,7 @@ export default function Dashboard() {
     if (!cityListings.length || !globalCosts) return [];
     const minP = Number(minPrice) || 0;
     const maxP = Number(maxPrice) || Infinity;
+    const minOcc = Number(minActualOcc) || 0;
     const cityQ = cityFilter.trim().toLowerCase();
     const filtered = cityListings.filter((l) => {
       if (search) {
@@ -162,6 +164,10 @@ export default function Dashboard() {
       if (fuelType !== "all" && (l.fuel_type ?? "").toUpperCase() !== fuelType) return false;
       const p = Number(l.avg_daily_price) || 0;
       if (p < minP || p > maxP) return false;
+      if (minOcc > 0) {
+        const occ = occupancy?.[l.vehicle_id];
+        if (!occ || occ.actualObserved < 7 || (occ.actualPct ?? 0) < minOcc) return false;
+      }
       return true;
     });
     const withProfit = filtered.map((l) => {
@@ -207,7 +213,7 @@ export default function Dashboard() {
     };
     withProfit.sort(cmp);
     return withProfit;
-  }, [cityListings, globalCosts, occupancy, priceAverages, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
+  }, [cityListings, globalCosts, occupancy, priceAverages, search, fuelType, cityFilter, minPrice, maxPrice, minActualOcc, sortKey, sortDir]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
@@ -393,6 +399,19 @@ export default function Dashboard() {
                 className="w-[90px]"
                 inputMode="decimal"
               />
+              <Select
+                value={minActualOcc || "__all__"}
+                onValueChange={(v) => setMinActualOcc(v === "__all__" ? "" : v)}
+              >
+                <SelectTrigger className="w-[150px]"><SelectValue placeholder="Actual occ." /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">Any occ.</SelectItem>
+                  <SelectItem value="20">20%+ actual</SelectItem>
+                  <SelectItem value="40">40%+ actual</SelectItem>
+                  <SelectItem value="60">60%+ actual</SelectItem>
+                  <SelectItem value="80">80%+ actual</SelectItem>
+                </SelectContent>
+              </Select>
               <Select value={fuelType} onValueChange={setFuelType}>
                 <SelectTrigger className="w-[140px]"><SelectValue placeholder="Fuel" /></SelectTrigger>
                 <SelectContent>
@@ -403,11 +422,11 @@ export default function Dashboard() {
                   <SelectItem value="DIESEL">Diesel</SelectItem>
                 </SelectContent>
               </Select>
-              {(search || cityFilter || minPrice || maxPrice || fuelType !== "all") && (
+              {(search || cityFilter || minPrice || maxPrice || minActualOcc || fuelType !== "all") && (
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => { setSearch(""); setCityFilter(""); setMinPrice(""); setMaxPrice(""); setFuelType("all"); }}
+                  onClick={() => { setSearch(""); setCityFilter(""); setMinPrice(""); setMaxPrice(""); setMinActualOcc(""); setFuelType("all"); }}
                 >
                   Clear
                 </Button>
