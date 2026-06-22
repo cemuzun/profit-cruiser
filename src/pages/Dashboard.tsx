@@ -81,6 +81,12 @@ export default function Dashboard() {
     queryFn: async () => ds.listings(),
   });
 
+  // Real occupancy from the scraped Turo calendar (next 30 days), per vehicle.
+  const { data: occupancy } = useQuery({
+    queryKey: ["occupancy-30d"],
+    queryFn: async () => ds.occupancyByVehicle(30),
+  });
+
   const { data: priceHistory } = useQuery({
     queryKey: ["price-history", city],
     queryFn: async () => {
