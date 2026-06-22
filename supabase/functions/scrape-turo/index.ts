@@ -20,7 +20,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
+const APIFY_API_TOKEN = Deno.env.get("APIFY_API_TOKEN")!;
 const TURO_PROXY_URL = Deno.env.get("TURO_PROXY_URL") ?? "";
 const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -78,70 +78,68 @@ async function backupProxyText(url: string): Promise<{ status: number; body: str
   }
 }
 
-// ---------- Zyte helpers ----------
-// Per-request timeout. Zyte itself can hang 30-40s on banned URLs (it keeps
-// retrying internally before giving up). With concurrency=3, that means a
-// single bad city can burn 2+ minutes of wall budget on one fetch. Cap at 25s.
+// ---------- Apify SuperScraper helpers ----------
+// We use Apify's SuperScraper API (apify/super-scraper-api), a drop-in
+// ScrapingBee-compatible HTML scraper running in standby mode (no per-request
+// cold start). Send a URL, get back HTML. Residential proxies + JS rendering
+// handle Turo's Cloudflare protection.
+//   - render_js=false  -> fast plain-HTTP fetch (SSR landing/detail pages)
+//   - render_js=true   -> headless browser render (price text that loads via JS)
+const APIFY_ENDPOINT = "https://super-scraper-api.apify.actor/";
+
+// Per-request timeout. Apify can take a while on browser renders; cap to keep
+// a single bad URL from burning the whole wall budget.
 const ZYTE_TIMEOUT_MS = 25_000;
 
-async function zyteText(
+async function apifyText(
   url: string,
   opts: { browser?: boolean; timeoutMs?: number } = {},
 ): Promise<{ status: number; body: string }> {
-  const reqBody: Record<string, unknown> = { url, geolocation: "US" };
-  if (opts.browser) {
-    // JS-rendered page (needed for Turo /search results which load via XHR).
-    reqBody.browserHtml = true;
-  } else {
-    reqBody.httpResponseBody = true;
-  }
+  const isGz = url.endsWith(".gz");
+  const params = new URLSearchParams({
+    url,
+    render_js: opts.browser ? "true" : "false",
+    premium_proxy: "true",
+    country_code: "US",
+    block_resources: "false",
+    transparent_status_code: "true",
+    device: "desktop",
+  });
+  if (isGz) params.set("binary_target", "true");
+
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? ZYTE_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch("https://api.zyte.com/v1/extract", {
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(reqBody),
+    res = await fetch(`${APIFY_ENDPOINT}?${params.toString()}`, {
+      method: "GET",
+      headers: { Authorization: "Bearer " + APIFY_API_TOKEN },
       signal: ctrl.signal,
     });
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) {
+  if (!res.ok && res.status !== 404) {
     const txt = await res.text();
-    throw new Error(`Zyte ${res.status} for ${url}: ${txt.slice(0, 200)}`);
+    throw new Error(`Apify ${res.status} for ${url}: ${txt.slice(0, 200)}`);
   }
-  const data = await res.json();
-  const status = data.statusCode ?? 0;
+  const status = res.status;
 
-  if (data.browserHtml) {
-    return { status, body: data.browserHtml as string };
-  }
-
-  const raw = data.httpResponseBody as string | undefined;
-  if (!raw) return { status, body: "" };
-
-  // Decode base64
-  const bin = atob(raw);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-  // Try gunzip if URL ends in .gz
-  if (url.endsWith(".gz")) {
+  // Gzip sitemap support (legacy path): decode + gunzip the binary body.
+  if (isGz) {
     try {
+      const buf = new Uint8Array(await res.arrayBuffer());
       const ds = new DecompressionStream("gzip");
-      const stream = new Blob([bytes]).stream().pipeThrough(ds);
+      const stream = new Blob([buf]).stream().pipeThrough(ds);
       const text = await new Response(stream).text();
       return { status, body: text };
     } catch {
-      // fall through and return raw
+      return { status, body: "" };
     }
   }
-  return { status, body: new TextDecoder().decode(bytes) };
+
+  const body = await res.text();
+  return { status, body };
 }
 
 // ---------- Discovery ----------
