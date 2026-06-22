@@ -65,15 +65,62 @@ export const DEFAULT_GLOBAL: GlobalCosts = {
   default_avg_miles_per_day: null,
 };
 
-// Smart estimate of purchase price based on year/make (very rough fallback).
+// Rough new-car MSRP (base price) by make, used to estimate purchase price
+// when no per-car override exists. Keeps depreciation realistic for exotics.
+const MAKE_BASE_PRICE: Record<string, number> = {
+  // Ultra-exotic / luxury
+  rollsroyce: 350000,
+  "rolls-royce": 350000,
+  bentley: 250000,
+  ferrari: 280000,
+  lamborghini: 270000,
+  mclaren: 250000,
+  astonmartin: 200000,
+  "aston martin": 200000,
+  maserati: 130000,
+  // Premium luxury
+  porsche: 110000,
+  "land rover": 95000,
+  landrover: 95000,
+  rangerover: 110000,
+  jaguar: 75000,
+  mercedes: 75000,
+  "mercedes-benz": 75000,
+  bmw: 70000,
+  audi: 65000,
+  cadillac: 65000,
+  lexus: 60000,
+  tesla: 55000,
+  lincoln: 60000,
+  genesis: 60000,
+  volvo: 55000,
+  // Mainstream
+  jeep: 45000,
+  ford: 40000,
+  chevrolet: 42000,
+  gmc: 50000,
+  ram: 50000,
+  toyota: 38000,
+  honda: 35000,
+  nissan: 35000,
+  hyundai: 32000,
+  kia: 32000,
+  volkswagen: 35000,
+  subaru: 35000,
+  mazda: 33000,
+};
+
+// Smart estimate of purchase price based on year/make.
 export function estimatePurchasePrice(car: CarLike, fallback: number): number {
   const year = car.year ?? new Date().getFullYear() - 5;
   const age = Math.max(0, new Date().getFullYear() - year);
-  const luxuryMakes = ["tesla", "porsche", "bmw", "mercedes", "audi", "lexus", "land rover", "jaguar", "maserati"];
-  const isLuxury = luxuryMakes.includes((car.make ?? "").toLowerCase());
-  const base = isLuxury ? 65000 : 30000;
-  const depreciated = base * Math.pow(0.85, age);
-  return Math.max(8000, Math.round(depreciated));
+  const makeKey = (car.make ?? "").toLowerCase().trim();
+  const base = MAKE_BASE_PRICE[makeKey] ?? fallback ?? 30000;
+  // Exotics hold value better; mainstream cars depreciate faster.
+  const annualRetention = base >= 150000 ? 0.92 : base >= 70000 ? 0.88 : 0.85;
+  const depreciated = base * Math.pow(annualRetention, age);
+  const floor = Math.max(8000, base * 0.25);
+  return Math.max(floor, Math.round(depreciated));
 }
 
 export function effectiveCosts(global: GlobalCosts, override?: CostOverride | null): GlobalCosts & {
