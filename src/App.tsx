@@ -35,6 +35,7 @@ const App = () => (
           <Route path="/seasonality" element={<Seasonality />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/admin" element={<Admin />} />
+          <Route path="/logs" element={<ScrapeLogs />} />
           
           <Route path="*" element={<NotFound />} />
         </Routes>
