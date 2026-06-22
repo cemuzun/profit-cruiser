@@ -56,6 +56,7 @@ export default function Dashboard() {
   const [cityFilter, setCityFilter] = useState("");
   const [minPrice, setMinPrice] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
+  const [minActualOcc, setMinActualOcc] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("profit");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
