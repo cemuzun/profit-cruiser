@@ -302,7 +302,7 @@ async function discoverVehicleIds(
     }
   }
 
-  const DISCOVERY_CONCURRENCY = 8;
+  const DISCOVERY_CONCURRENCY = 16;
   let taskIdx = 0;
   async function discoveryWorker() {
     while (taskIdx < tasks.length) {
