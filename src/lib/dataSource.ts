@@ -146,6 +146,40 @@ async function fetchRuns(): Promise<ScrapeRun[]> {
   return (data ?? []) as ScrapeRun[];
 }
 
+export type CalendarScrapeRun = {
+  id: string;
+  city: string;
+  status: string;
+  vehicles_attempted: number | null;
+  vehicles_ok: number | null;
+  vehicles_failed: number | null;
+  source_api_count: number | null;
+  source_html_count: number | null;
+  error_message: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+async function fetchScrapeRuns(limit = 200): Promise<ScrapeRun[]> {
+  const { data, error } = await supabase
+    .from("scrape_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data ?? []) as ScrapeRun[];
+}
+
+async function fetchCalendarScrapeRuns(limit = 200): Promise<CalendarScrapeRun[]> {
+  const { data, error } = await supabase
+    .from("calendar_scrape_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data ?? []) as CalendarScrapeRun[];
+}
+
 async function fetchCities(): Promise<City[]> {
   const { data, error } = await supabase
     .from("cities")
@@ -246,6 +280,8 @@ export const ds = {
   snapshots: () => fetchSnapshots(),
   forecasts: () => fetchForecasts(),
   runs: () => fetchRuns(),
+  scrapeRuns: (limit?: number) => fetchScrapeRuns(limit),
+  calendarScrapeRuns: (limit?: number) => fetchCalendarScrapeRuns(limit),
   cities: () => fetchCities(),
   scrapeFilters: () => fetchScrapeFilters(),
   saveScrapeFilters,

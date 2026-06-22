@@ -14,6 +14,7 @@ import NotFound from "./pages/NotFound.tsx";
 import Cities from "./pages/Cities.tsx";
 import BestCars from "./pages/BestCars.tsx";
 import Admin from "./pages/Admin.tsx";
+import ScrapeLogs from "./pages/ScrapeLogs.tsx";
 
 const queryClient = new QueryClient();
 
@@ -34,6 +35,7 @@ const App = () => (
           <Route path="/seasonality" element={<Seasonality />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/admin" element={<Admin />} />
+          <Route path="/logs" element={<ScrapeLogs />} />
           
           <Route path="*" element={<NotFound />} />
         </Routes>

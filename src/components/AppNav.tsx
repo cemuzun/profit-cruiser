@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { BarChart3, Calculator, Bookmark, Settings, Car, CalendarRange, GitCompare, MapPin, ShieldAlert, Trophy } from "lucide-react";
+import { BarChart3, Calculator, Bookmark, Settings, Car, CalendarRange, GitCompare, MapPin, ShieldAlert, Trophy, ScrollText } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const links = [
@@ -11,6 +11,7 @@ const links = [
   { to: "/compare", label: "Compare", icon: GitCompare },
   { to: "/seasonality", label: "Seasonality", icon: CalendarRange },
   { to: "/admin", label: "Admin", icon: ShieldAlert },
+  { to: "/logs", label: "Logs", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
