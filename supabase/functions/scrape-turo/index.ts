@@ -180,103 +180,134 @@ const PRICE_BUCKETS: Array<[number, number]> = [
   [450, 5000],
 ];
 
-// Generic regex that matches any Turo vehicle detail URL inside a search/landing page.
-// Captures: type slug, make slug, model slug, numeric vehicle id.
-const VEHICLE_URL_RE =
-  /\/us\/en\/([a-z-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8})/g;
+// Anchor opening for each vehicle card on a Turo listing page.
+const CARD_SPLIT = 'data-testid="vehicle-card-link-box"';
 
-// Newer Turo detail URL: /us/en/car-details/{id}. These don't include make/model
-// in the URL — we'll get those from the JSON-LD on the detail page.
-const CAR_DETAILS_RE = /\/us\/en\/car-details\/(\d{4,8})/g;
+// Maps Turo category slugs to our vehicle_type enum.
+const TYPE_MAP: Record<string, string> = {
+  "car-rental": "CAR",
+  "suv-rental": "SUV",
+  "truck-rental": "TRUCK",
+  "minivan-rental": "MINIVAN",
+  "van-rental": "VAN",
+  "sports-rental": "SPORTS",
+  "exotic-luxury-rental": "EXOTIC",
+  "convertible-rental": "CONVERTIBLE",
+  "electric-vehicle-rental": "EV",
+};
 
-type FoundVehicle = { id: string; href: string; make: string; model: string; type: string };
+// A fully-parsed listing row, built directly from the listing-page card markup.
+type ParsedVehicle = {
+  vehicle_id: string;
+  city: string;
+  make: string | null;
+  model: string | null;
+  year: number | null;
+  trim: null;
+  vehicle_type: string | null;
+  fuel_type: string | null;
+  avg_daily_price: number | null;
+  currency: string;
+  completed_trips: number | null;
+  rating: number | null;
+  is_all_star_host: boolean;
+  host_id: null;
+  host_name: null;
+  image_url: string | null;
+  listing_url: string;
+  location_city: string | null;
+  location_state: string | null;
+  latitude: null;
+  longitude: null;
+  last_scraped_at: string;
+};
 
-function harvestFromHtml(
-  html: string,
-  found: Map<string, FoundVehicle>,
-): number {
-  const before = found.size;
-  VEHICLE_URL_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = VEHICLE_URL_RE.exec(html)) !== null) {
-    const [whole, type, make, model, id] = m;
-    if (!found.has(id)) {
-      found.set(id, {
-        id,
-        href: `https://turo.com${whole}`,
-        make: make.replace(/-/g, " "),
-        model: model.replace(/-/g, " "),
-        type,
-      });
-    }
+const titleCase = (s: string) =>
+  s.replace(/\b\w/g, (c) => c.toUpperCase());
+
+// Parse a single vehicle-card chunk from a Turo listing page into a row.
+// All the data we need is rendered server-side in the card:
+//   href (type/make/model/id), image alt ("Make Model YEAR in City, ST"),
+//   "$NNN/day" price, and an optional "Rating: N out of 5 stars" + "(trips)".
+function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
+  const hrefM = chunk.match(
+    /href="(https:\/\/turo\.com\/us\/en\/([a-z0-9-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8}))"/,
+  );
+  if (!hrefM) return null;
+  const [, href, typeSlug, makeSlug, modelSlug, id] = hrefM;
+
+  // Image + alt text ("Chevrolet Corvette 2026 in Miami, FL").
+  const imgM = chunk.match(/<img[^>]+alt="([^"]*)"[^>]+src="(https:\/\/images\.turo\.com[^"]+)"/) ??
+    chunk.match(/<img[^>]+src="(https:\/\/images\.turo\.com[^"]+)"[^>]+alt="([^"]*)"/);
+  let alt = "";
+  let image: string | null = null;
+  if (imgM) {
+    if (imgM[2]?.startsWith("http")) { alt = imgM[1]; image = imgM[2]; }
+    else { alt = imgM[2] ?? ""; image = imgM[1]; }
   }
-  CAR_DETAILS_RE.lastIndex = 0;
-  while ((m = CAR_DETAILS_RE.exec(html)) !== null) {
-    const id = m[1];
-    if (!found.has(id)) {
-      found.set(id, {
-        id,
-        href: `https://turo.com/us/en/car-details/${id}`,
-        make: "",
-        model: "",
-        type: "car-rental",
-      });
-    }
-  }
-  return found.size - before;
-}
 
-// Build Turo /search URL for a city using its coordinates + place_id.
-function buildSearchUrl(
-  city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
-  opts: { minPrice?: number; maxPrice?: number } = {},
-): string {
-  const params = new URLSearchParams({
-    age: "30",
-    country: "US",
-    defaultZoomLevel: "11",
-    deliveryLocationType: "city",
-    isMapSearch: "false",
-    itemsPerPage: "200",
-    latitude: String(city.latitude),
-    longitude: String(city.longitude),
-    location: `${city.name}, ${city.region ?? ""}, USA`.replace(/, ,/g, ","),
-    locationType: "CITY",
-    pickupType: "ALL",
-    region: city.region ?? "",
-    searchDurationType: "DAILY",
-    sortType: "RELEVANCE",
-    flexibleType: "NOT_FLEXIBLE",
-  });
-  if (city.place_id) params.set("placeId", city.place_id);
-  if (opts.minPrice != null) params.set("minDailyPrice", String(opts.minPrice));
-  if (opts.maxPrice != null) params.set("maxDailyPrice", String(opts.maxPrice));
-  return `https://turo.com/us/en/search?${params.toString()}`;
+  // Year: from alt (" 2026 in ") or any 4-digit year in the card.
+  const yearM = alt.match(/\b(19|20)\d{2}\b/) ?? chunk.match(/>(\b(?:19|20)\d{2})<\/p>/);
+  const year = yearM ? parseInt(yearM[0].replace(/[^\d]/g, ""), 10) : null;
+
+  // Location from alt ("... in Miami, FL").
+  const locM = alt.match(/ in ([^,<]+),\s*([A-Z]{2})/);
+
+  // Price: "$201</span><span ...>/day".
+  const priceM = chunk.match(/\$\s*([\d,]+)\s*<\/span>\s*<span[^>]*>\s*\/day/i) ??
+    chunk.match(/\$\s*([\d,]+)[^<]*<[^>]*>\s*\/day/i);
+  const price = priceM ? parseInt(priceM[1].replace(/,/g, ""), 10) : null;
+
+  // Rating + trips.
+  const ratingM = chunk.match(/Rating:\s*([\d.]+)\s*out of 5/i);
+  const rating = ratingM ? parseFloat(ratingM[1]) : null;
+  const tripsM = chunk.match(/\((\d+)\)\s*<\/p>/);
+  const trips = tripsM ? parseInt(tripsM[1], 10) : (rating != null ? 0 : null);
+
+  const make = makeSlug.replace(/-/g, " ");
+  const model = modelSlug.replace(/-/g, " ");
+
+  return {
+    vehicle_id: id,
+    city: citySlug,
+    make: make ? titleCase(make) : null,
+    model: model ? titleCase(model) : null,
+    year: Number.isFinite(year as number) ? year : null,
+    trim: null,
+    vehicle_type: TYPE_MAP[typeSlug] ?? null,
+    fuel_type: typeSlug === "electric-vehicle-rental" ? "Electric" : null,
+    avg_daily_price: price,
+    currency: "USD",
+    completed_trips: trips,
+    rating,
+    is_all_star_host: false,
+    host_id: null,
+    host_name: null,
+    image_url: image,
+    listing_url: href,
+    location_city: locM ? locM[1].trim() : null,
+    location_state: locM ? locM[2] : null,
+    latitude: null,
+    longitude: null,
+    last_scraped_at: new Date().toISOString(),
+  };
 }
 
 async function discoverVehicleIds(
   city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
   citySlugInUrl: string,
+  citySlug: string,
   filters?: {
     vehicle_types: string[];
     min_daily_price: number | null;
     max_daily_price: number | null;
   } | null,
-): Promise<FoundVehicle[]> {
-  const found = new Map<string, FoundVehicle>();
+): Promise<ParsedVehicle[]> {
+  const found = new Map<string, ParsedVehicle>();
 
-  // NOTE: Turo's /search page loads results via XHR — even with JS rendering
-  // it only returns ~4-6 vehicles per request and is very slow (3+ min for 9
-  // requests). Category landing pages are SSR'd and return 30-40 per page,
-  // so we rely solely on them.
-
-  // --- Category landing pages (SSR, fast, 30-40 vehicles per page) ---
-  // Category fallback uses a city-scoped regex to avoid mis-attributing vehicles.
-  const cityRe = new RegExp(
-    `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
-    "g",
-  );
-
+  // Category landing pages are SSR'd and return 30-40 fully-rendered vehicle
+  // cards per page (price, rating, image and all). We parse those cards
+  // directly — no per-vehicle detail fetch (Turo blocks detail pages).
   const activeCats = filters?.vehicle_types?.length
     ? CATEGORY_SLUGS.filter((c) => filters!.vehicle_types.includes(c))
     : CATEGORY_SLUGS;
@@ -292,9 +323,6 @@ async function discoverVehicleIds(
     maxP != null ? Math.min(hi, maxP) : hi,
   ] as [number, number]);
 
-  // Build the full task list, then fan out with limited concurrency.
-  // Sequentially this loop did 9 categories × 8 buckets = 72 Zyte calls,
-  // taking 2-3 minutes — leaving no wall budget for vehicle parsing.
   const tasks: Array<{ cat: string; lo: number; hi: number; url: string }> = [];
   for (const cat of activeCats) {
     for (const [lo, hi] of activeBuckets) {
@@ -308,37 +336,23 @@ async function discoverVehicleIds(
   }
 
   const DISCOVERY_CONCURRENCY = 16;
-  // Hard cap on discovery wall time so detail parsing always gets budget.
-  const DISCOVERY_DEADLINE_MS = Date.now() + 55_000;
   let taskIdx = 0;
   async function discoveryWorker() {
     while (taskIdx < tasks.length) {
-      if (Date.now() > DISCOVERY_DEADLINE_MS) return;
       const t = tasks[taskIdx++];
       let res;
       try {
-        res = await apifyText(t.url, { timeoutMs: 20_000 });
+        res = await apifyText(t.url, { timeoutMs: 25_000 });
       } catch (e) {
         console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
         continue;
       }
       if (res.status !== 200) continue;
       const before = found.size;
-      // Each worker uses its OWN regex instance so the shared `cityRe.lastIndex`
-      // doesn't get clobbered across concurrent workers.
-      const localRe = new RegExp(cityRe.source, cityRe.flags);
-      let m: RegExpExecArray | null;
-      while ((m = localRe.exec(res.body)) !== null) {
-        const [whole, type, make, model, id] = m;
-        if (!found.has(id)) {
-          found.set(id, {
-            id,
-            href: `https://turo.com${whole}`,
-            make: make.replace(/-/g, " "),
-            model: model.replace(/-/g, " "),
-            type,
-          });
-        }
+      const chunks = res.body.split(CARD_SPLIT).slice(1);
+      for (const chunk of chunks) {
+        const row = parseCard(chunk, citySlug);
+        if (row && !found.has(row.vehicle_id)) found.set(row.vehicle_id, row);
       }
       console.log(`  ${t.cat} $${t.lo}-${t.hi}: +${found.size - before} (total ${found.size})`);
     }
