@@ -110,10 +110,42 @@ export default function Dashboard() {
     },
   });
 
+  // Per-vehicle 7/14/30-day price averages computed from snapshot history,
+  // because the listings_current.price_*_avg columns are not populated.
+  const { data: priceAverages } = useQuery({
+    queryKey: ["price-averages"],
+    queryFn: async () => {
+      const snaps = await ds.snapshots();
+      const now = Date.now();
+      const w = (days: number) => now - days * 24 * 60 * 60 * 1000;
+      const acc = new Map<string, { s7: number; n7: number; s14: number; n14: number; s30: number; n30: number }>();
+      for (const s of snaps) {
+        const price = Number(s.avg_daily_price);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        const t = new Date(s.scraped_at).getTime();
+        const a = acc.get(s.vehicle_id) ?? { s7: 0, n7: 0, s14: 0, n14: 0, s30: 0, n30: 0 };
+        if (t >= w(7)) { a.s7 += price; a.n7 += 1; }
+        if (t >= w(14)) { a.s14 += price; a.n14 += 1; }
+        if (t >= w(30)) { a.s30 += price; a.n30 += 1; }
+        acc.set(s.vehicle_id, a);
+      }
+      const out: Record<string, { p7: number | null; p14: number | null; p30: number | null }> = {};
+      for (const [id, a] of acc) {
+        out[id] = {
+          p7: a.n7 ? a.s7 / a.n7 : null,
+          p14: a.n14 ? a.s14 / a.n14 : null,
+          p30: a.n30 ? a.s30 / a.n30 : null,
+        };
+      }
+      return out;
+    },
+  });
+
   const cityListings = useMemo<Listing[]>(() => {
     if (!listings) return [];
     return city === "all" ? listings : listings.filter(l => l.city === city);
   }, [listings, city]);
+
 
   const enriched = useMemo(() => {
     if (!cityListings.length || !globalCosts) return [];
@@ -138,8 +170,12 @@ export default function Dashboard() {
       const occ = occupancy?.[l.vehicle_id];
       const override =
         occ && occ.observedDays >= 7 ? { utilization_pct: occ.occupancyPct } : null;
+      const avgs = priceAverages?.[l.vehicle_id];
       return {
         ...l,
+        price_7d_avg: l.price_7d_avg ?? avgs?.p7 ?? null,
+        price_14d_avg: l.price_14d_avg ?? avgs?.p14 ?? null,
+        price_30d_avg: l.price_30d_avg ?? avgs?.p30 ?? null,
         occupancyPct: occ?.occupancyPct ?? null,
         occupancyDays: occ?.observedDays ?? 0,
         profit: computeProfit(l as any, globalCosts, override),
@@ -164,7 +200,7 @@ export default function Dashboard() {
     };
     withProfit.sort(cmp);
     return withProfit;
-  }, [cityListings, globalCosts, occupancy, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
+  }, [cityListings, globalCosts, occupancy, priceAverages, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
