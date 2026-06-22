@@ -719,6 +719,9 @@ async function runScrape(citySlug: string) {
     const SAFETY_WINDOW_MS = 25_000;
     const startMs = Date.now();
     const deadlineMs = startMs + RUN_BUDGET_MS - SAFETY_WINDOW_MS;
+    // Expose the deadline to fetchVehicle so it can skip the slow browser retry
+    // when time is running out.
+    detailDeadlineMs = deadlineMs;
     let stoppedEarly = false;
 
     // Incremental persist: every N rows we upsert what we have so far and
