@@ -701,8 +701,9 @@ async function runScrape(citySlug: string) {
     }
 
     // Fetch detail pages with limited concurrency.
-    // Lowered from 5 → 3: Zyte was rate-limiting / banning under heavier load.
-    const CONCURRENCY = 3;
+    // Apify SuperScraper runs in standby and handles parallel requests well, so
+    // we raise concurrency to 8 to fit all detail fetches inside the wall budget.
+    const CONCURRENCY = 8;
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
