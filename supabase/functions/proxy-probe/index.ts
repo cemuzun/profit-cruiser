@@ -1,7 +1,5 @@
-// Temporary diagnostic: inspect GEONIX_PROXY_URL / TURO_PROXY_URL shape and
-// test fetching a Turo listing page through them. Does NOT leak secret values.
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
-
+// Temporary diagnostic v2: test raw residential proxies via Deno.createHttpClient
+// with basicAuth passed separately. Does NOT leak secret values.
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -9,78 +7,71 @@ const corsHeaders = {
 
 const GEONIX = Deno.env.get("GEONIX_PROXY_URL") ?? "";
 const TURO = Deno.env.get("TURO_PROXY_URL") ?? "";
-
 const TEST_URL = "https://turo.com/us/en/car-rental/united-states/miami-fl";
 
-function shape(raw: string) {
-  if (!raw) return { present: false };
-  let scheme = "(none)";
-  const m = raw.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//);
-  if (m) scheme = m[1];
-  const hasAuth = /\/\/[^/@]+@/.test(raw);
-  const hasUrlParam = /[?&]url=/.test(raw) || raw.endsWith("=") || raw.endsWith("?");
-  // Try to extract host:port without exposing credentials
-  let hostPort = "(unknown)";
-  try {
+// Parse "http://user:pass@host:port" OR "host:port:user:pass" OR "host:port"
+function parseProxy(raw: string): { url: string; username?: string; password?: string } | null {
+  if (!raw) return null;
+  if (/^[a-z]+:\/\//i.test(raw)) {
     const u = new URL(raw);
-    hostPort = `${u.hostname}:${u.port || "(default)"}`;
-  } catch {
-    const hp = raw.replace(/^[a-z]+:\/\//i, "").replace(/^[^@]+@/, "").split(/[/?]/)[0];
-    hostPort = hp || "(unparseable)";
+    return {
+      url: `${u.protocol}//${u.hostname}:${u.port}`,
+      username: u.username ? decodeURIComponent(u.username) : undefined,
+      password: u.password ? decodeURIComponent(u.password) : undefined,
+    };
   }
-  return { present: true, scheme, hasAuth, looksLikeApiGateway: hasUrlParam, hostPort, length: raw.length };
+  const parts = raw.split(":");
+  if (parts.length === 4) {
+    const [host, port, user, pass] = parts;
+    return { url: `http://${host}:${port}`, username: user, password: pass };
+  }
+  if (parts.length === 2) return { url: `http://${parts[0]}:${parts[1]}` };
+  return null;
 }
 
-async function tryGateway(raw: string) {
-  // API-gateway style: append ?url=<target>
-  const sep = raw.includes("?") ? "&" : "?";
-  const u = `${raw}${sep}url=${encodeURIComponent(TEST_URL)}`;
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 25_000);
-  try {
-    const res = await fetch(u, { signal: ctrl.signal, headers: { Accept: "text/html" } });
-    const body = await res.text();
-    return { mode: "gateway", status: res.status, bytes: body.length, hasCards: body.includes("vehicle-card-link-box"), blocked: body.slice(0, 2000).toLowerCase().includes("just a moment") };
-  } catch (e) {
-    return { mode: "gateway", error: e instanceof Error ? e.message : String(e) };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function tryHttpClient(raw: string) {
-  // Raw host:port proxy style via Deno.createHttpClient
+async function testProxy(raw: string) {
+  const p = parseProxy(raw);
+  if (!p) return { error: "unparseable" };
   try {
     // deno-lint-ignore no-explicit-any
-    const client = (Deno as any).createHttpClient({ proxy: { url: raw } });
+    const client = (Deno as any).createHttpClient({
+      proxy: { url: p.url, basicAuth: p.username ? { username: p.username, password: p.password } : undefined },
+    });
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 25_000);
+    const t = setTimeout(() => ctrl.abort(), 30_000);
     try {
-      // deno-lint-ignore no-explicit-any
-      const res = await fetch(TEST_URL, { client, signal: ctrl.signal, headers: { Accept: "text/html", "User-Agent": "Mozilla/5.0" } } as any);
+      const res = await fetch(TEST_URL, {
+        // deno-lint-ignore no-explicit-any
+        client,
+        signal: ctrl.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      } as any);
       const body = await res.text();
-      return { mode: "httpClient", status: res.status, bytes: body.length, hasCards: body.includes("vehicle-card-link-box"), blocked: body.slice(0, 2000).toLowerCase().includes("just a moment") };
+      return {
+        status: res.status,
+        bytes: body.length,
+        hasCards: body.includes("vehicle-card-link-box"),
+        cardCount: body.split("vehicle-card-link-box").length - 1,
+        blocked: body.slice(0, 3000).toLowerCase().includes("just a moment"),
+      };
     } finally {
       clearTimeout(t);
     }
   } catch (e) {
-    return { mode: "httpClient", error: e instanceof Error ? e.message : String(e) };
+    return { error: e instanceof Error ? e.message : String(e) };
   }
 }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-  const out: Record<string, unknown> = {
-    geonix: shape(GEONIX),
-    turo: shape(TURO),
+  const out = {
+    geonix: GEONIX ? await testProxy(GEONIX) : "absent",
+    turo: TURO ? await testProxy(TURO) : "absent",
   };
-  if (GEONIX) {
-    out.geonix_gateway = await tryGateway(GEONIX);
-    out.geonix_httpclient = await tryHttpClient(GEONIX);
-  }
-  if (TURO) {
-    out.turo_gateway = await tryGateway(TURO);
-  }
   return new Response(JSON.stringify(out, null, 2), {
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
