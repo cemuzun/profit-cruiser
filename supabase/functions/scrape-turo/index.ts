@@ -735,10 +735,8 @@ async function runScrape(citySlug: string) {
         .eq("id", runId);
     }
 
-    // Fetch detail pages with limited concurrency.
-    // Apify SuperScraper runs in standby and handles parallel requests well, so
-    // we raise concurrency to 8 to fit all detail fetches inside the wall budget.
-    const CONCURRENCY = 12;
+    // Listings are parsed directly from the SSR card markup, so there's no
+    // detail-fetch phase — just a fast synchronous validation/upsert pass.
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
