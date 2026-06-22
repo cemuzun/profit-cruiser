@@ -152,6 +152,7 @@ export default function Dashboard() {
     if (!cityListings.length || !globalCosts) return [];
     const minP = Number(minPrice) || 0;
     const maxP = Number(maxPrice) || Infinity;
+    const minOcc = Number(minActualOcc) || 0;
     const cityQ = cityFilter.trim().toLowerCase();
     const filtered = cityListings.filter((l) => {
       if (search) {
@@ -163,6 +164,10 @@ export default function Dashboard() {
       if (fuelType !== "all" && (l.fuel_type ?? "").toUpperCase() !== fuelType) return false;
       const p = Number(l.avg_daily_price) || 0;
       if (p < minP || p > maxP) return false;
+      if (minOcc > 0) {
+        const occ = occupancy?.[l.vehicle_id];
+        if (!occ || occ.actualObserved < 7 || (occ.actualPct ?? 0) < minOcc) return false;
+      }
       return true;
     });
     const withProfit = filtered.map((l) => {
