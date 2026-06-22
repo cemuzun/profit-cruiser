@@ -119,11 +119,16 @@ async function apifyText(
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok && res.status !== 404) {
-    const txt = await res.text();
-    throw new Error(`Apify ${res.status} for ${url}: ${txt.slice(0, 200)}`);
-  }
   const status = res.status;
+
+  // Soft-fail on any non-2xx (e.g. Turo 403 via transparent_status_code, or
+  // Apify proxy 5xx). Returning the status with an empty body lets the caller's
+  // fallback logic (browser render / backup proxy) kick in instead of throwing
+  // and aborting the whole vehicle.
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    return { status, body: "" };
+  }
 
   // Gzip sitemap support (legacy path): decode + gunzip the binary body.
   if (isGz) {
