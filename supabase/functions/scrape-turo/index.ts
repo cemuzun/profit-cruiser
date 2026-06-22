@@ -119,11 +119,16 @@ async function apifyText(
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok && res.status !== 404) {
-    const txt = await res.text();
-    throw new Error(`Apify ${res.status} for ${url}: ${txt.slice(0, 200)}`);
-  }
   const status = res.status;
+
+  // Soft-fail on any non-2xx (e.g. Turo 403 via transparent_status_code, or
+  // Apify proxy 5xx). Returning the status with an empty body lets the caller's
+  // fallback logic (browser render / backup proxy) kick in instead of throwing
+  // and aborting the whole vehicle.
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    return { status, body: "" };
+  }
 
   // Gzip sitemap support (legacy path): decode + gunzip the binary body.
   if (isGz) {
@@ -164,114 +169,145 @@ function cityUrlSlug(city: { name: string; region: string | null }): string {
 
 // Price buckets ($/day). Turo's listing pages cap at ~30-40 results;
 // splitting by price lets us pull many more vehicles per category.
+// Coarser buckets (4 instead of 8). Apify is slower per request than Zyte, so
+// we trade some long-tail coverage for fitting discovery + detail parsing into
+// the ~150s edge-function wall budget. Residential proxy already returns the
+// full SSR listing page, so each bucket still yields 30-40 vehicles.
 const PRICE_BUCKETS: Array<[number, number]> = [
-  [0, 50],
-  [50, 80],
-  [80, 120],
-  [120, 180],
-  [180, 280],
-  [280, 450],
-  [450, 800],
-  [800, 5000],
+  [0, 80],
+  [80, 180],
+  [180, 450],
+  [450, 5000],
 ];
 
-// Generic regex that matches any Turo vehicle detail URL inside a search/landing page.
-// Captures: type slug, make slug, model slug, numeric vehicle id.
-const VEHICLE_URL_RE =
-  /\/us\/en\/([a-z-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8})/g;
+// Anchor opening for each vehicle card on a Turo listing page.
+const CARD_SPLIT = 'data-testid="vehicle-card-link-box"';
 
-// Newer Turo detail URL: /us/en/car-details/{id}. These don't include make/model
-// in the URL — we'll get those from the JSON-LD on the detail page.
-const CAR_DETAILS_RE = /\/us\/en\/car-details\/(\d{4,8})/g;
+// Maps Turo category slugs to our vehicle_type enum.
+const TYPE_MAP: Record<string, string> = {
+  "car-rental": "CAR",
+  "suv-rental": "SUV",
+  "truck-rental": "TRUCK",
+  "minivan-rental": "MINIVAN",
+  "van-rental": "VAN",
+  "sports-rental": "SPORTS",
+  "exotic-luxury-rental": "EXOTIC",
+  "convertible-rental": "CONVERTIBLE",
+  "electric-vehicle-rental": "EV",
+};
 
-type FoundVehicle = { id: string; href: string; make: string; model: string; type: string };
+// A fully-parsed listing row, built directly from the listing-page card markup.
+type ParsedVehicle = {
+  vehicle_id: string;
+  city: string;
+  make: string | null;
+  model: string | null;
+  year: number | null;
+  trim: null;
+  vehicle_type: string | null;
+  fuel_type: string | null;
+  avg_daily_price: number | null;
+  currency: string;
+  completed_trips: number | null;
+  rating: number | null;
+  is_all_star_host: boolean;
+  host_id: null;
+  host_name: null;
+  image_url: string | null;
+  listing_url: string;
+  location_city: string | null;
+  location_state: string | null;
+  latitude: null;
+  longitude: null;
+  last_scraped_at: string;
+};
 
-function harvestFromHtml(
-  html: string,
-  found: Map<string, FoundVehicle>,
-): number {
-  const before = found.size;
-  VEHICLE_URL_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = VEHICLE_URL_RE.exec(html)) !== null) {
-    const [whole, type, make, model, id] = m;
-    if (!found.has(id)) {
-      found.set(id, {
-        id,
-        href: `https://turo.com${whole}`,
-        make: make.replace(/-/g, " "),
-        model: model.replace(/-/g, " "),
-        type,
-      });
-    }
+const titleCase = (s: string) =>
+  s.replace(/\b\w/g, (c) => c.toUpperCase());
+
+// Parse a single vehicle-card chunk from a Turo listing page into a row.
+// All the data we need is rendered server-side in the card:
+//   href (type/make/model/id), image alt ("Make Model YEAR in City, ST"),
+//   "$NNN/day" price, and an optional "Rating: N out of 5 stars" + "(trips)".
+function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
+  const hrefM = chunk.match(
+    /href="(https:\/\/turo\.com\/us\/en\/([a-z0-9-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8}))"/,
+  );
+  if (!hrefM) return null;
+  const [, href, typeSlug, makeSlug, modelSlug, id] = hrefM;
+
+  // Image + alt text ("Chevrolet Corvette 2026 in Miami, FL").
+  const imgM = chunk.match(/<img[^>]+alt="([^"]*)"[^>]+src="(https:\/\/images\.turo\.com[^"]+)"/) ??
+    chunk.match(/<img[^>]+src="(https:\/\/images\.turo\.com[^"]+)"[^>]+alt="([^"]*)"/);
+  let alt = "";
+  let image: string | null = null;
+  if (imgM) {
+    if (imgM[2]?.startsWith("http")) { alt = imgM[1]; image = imgM[2]; }
+    else { alt = imgM[2] ?? ""; image = imgM[1]; }
   }
-  CAR_DETAILS_RE.lastIndex = 0;
-  while ((m = CAR_DETAILS_RE.exec(html)) !== null) {
-    const id = m[1];
-    if (!found.has(id)) {
-      found.set(id, {
-        id,
-        href: `https://turo.com/us/en/car-details/${id}`,
-        make: "",
-        model: "",
-        type: "car-rental",
-      });
-    }
-  }
-  return found.size - before;
-}
 
-// Build Turo /search URL for a city using its coordinates + place_id.
-function buildSearchUrl(
-  city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
-  opts: { minPrice?: number; maxPrice?: number } = {},
-): string {
-  const params = new URLSearchParams({
-    age: "30",
-    country: "US",
-    defaultZoomLevel: "11",
-    deliveryLocationType: "city",
-    isMapSearch: "false",
-    itemsPerPage: "200",
-    latitude: String(city.latitude),
-    longitude: String(city.longitude),
-    location: `${city.name}, ${city.region ?? ""}, USA`.replace(/, ,/g, ","),
-    locationType: "CITY",
-    pickupType: "ALL",
-    region: city.region ?? "",
-    searchDurationType: "DAILY",
-    sortType: "RELEVANCE",
-    flexibleType: "NOT_FLEXIBLE",
-  });
-  if (city.place_id) params.set("placeId", city.place_id);
-  if (opts.minPrice != null) params.set("minDailyPrice", String(opts.minPrice));
-  if (opts.maxPrice != null) params.set("maxDailyPrice", String(opts.maxPrice));
-  return `https://turo.com/us/en/search?${params.toString()}`;
+  // Year: from alt (" 2026 in ") or any 4-digit year in the card.
+  const yearM = alt.match(/\b(19|20)\d{2}\b/) ?? chunk.match(/>(\b(?:19|20)\d{2})<\/p>/);
+  const year = yearM ? parseInt(yearM[0].replace(/[^\d]/g, ""), 10) : null;
+
+  // Location from alt ("... in Miami, FL").
+  const locM = alt.match(/ in ([^,<]+),\s*([A-Z]{2})/);
+
+  // Price: "$201</span><span ...>/day".
+  const priceM = chunk.match(/\$\s*([\d,]+)\s*<\/span>\s*<span[^>]*>\s*\/day/i) ??
+    chunk.match(/\$\s*([\d,]+)[^<]*<[^>]*>\s*\/day/i);
+  const price = priceM ? parseInt(priceM[1].replace(/,/g, ""), 10) : null;
+
+  // Rating + trips.
+  const ratingM = chunk.match(/Rating:\s*([\d.]+)\s*out of 5/i);
+  const rating = ratingM ? parseFloat(ratingM[1]) : null;
+  const tripsM = chunk.match(/\((\d+)\)\s*<\/p>/);
+  const trips = tripsM ? parseInt(tripsM[1], 10) : (rating != null ? 0 : null);
+
+  const make = makeSlug.replace(/-/g, " ");
+  const model = modelSlug.replace(/-/g, " ");
+
+  return {
+    vehicle_id: id,
+    city: citySlug,
+    make: make ? titleCase(make) : null,
+    model: model ? titleCase(model) : null,
+    year: Number.isFinite(year as number) ? year : null,
+    trim: null,
+    vehicle_type: TYPE_MAP[typeSlug] ?? null,
+    fuel_type: typeSlug === "electric-vehicle-rental" ? "Electric" : null,
+    avg_daily_price: price,
+    currency: "USD",
+    completed_trips: trips,
+    rating,
+    is_all_star_host: false,
+    host_id: null,
+    host_name: null,
+    image_url: image,
+    listing_url: href,
+    location_city: locM ? locM[1].trim() : null,
+    location_state: locM ? locM[2] : null,
+    latitude: null,
+    longitude: null,
+    last_scraped_at: new Date().toISOString(),
+  };
 }
 
 async function discoverVehicleIds(
   city: { name: string; region: string | null; latitude: number; longitude: number; place_id: string | null },
   citySlugInUrl: string,
+  citySlug: string,
   filters?: {
     vehicle_types: string[];
     min_daily_price: number | null;
     max_daily_price: number | null;
   } | null,
-): Promise<FoundVehicle[]> {
-  const found = new Map<string, FoundVehicle>();
+): Promise<ParsedVehicle[]> {
+  const found = new Map<string, ParsedVehicle>();
 
-  // NOTE: Turo's /search page loads results via XHR — even with JS rendering
-  // it only returns ~4-6 vehicles per request and is very slow (3+ min for 9
-  // requests). Category landing pages are SSR'd and return 30-40 per page,
-  // so we rely solely on them.
-
-  // --- Category landing pages (SSR, fast, 30-40 vehicles per page) ---
-  // Category fallback uses a city-scoped regex to avoid mis-attributing vehicles.
-  const cityRe = new RegExp(
-    `/us/en/([a-z-]+-rental)/united-states/${citySlugInUrl}/([a-z0-9-]+)/([a-z0-9-]+)/(\\d{4,8})`,
-    "g",
-  );
-
+  // Category landing pages are SSR'd and return 30-40 fully-rendered vehicle
+  // cards per page (price, rating, image and all). We parse those cards
+  // directly — no per-vehicle detail fetch (Turo blocks detail pages).
   const activeCats = filters?.vehicle_types?.length
     ? CATEGORY_SLUGS.filter((c) => filters!.vehicle_types.includes(c))
     : CATEGORY_SLUGS;
@@ -287,9 +323,6 @@ async function discoverVehicleIds(
     maxP != null ? Math.min(hi, maxP) : hi,
   ] as [number, number]);
 
-  // Build the full task list, then fan out with limited concurrency.
-  // Sequentially this loop did 9 categories × 8 buckets = 72 Zyte calls,
-  // taking 2-3 minutes — leaving no wall budget for vehicle parsing.
   const tasks: Array<{ cat: string; lo: number; hi: number; url: string }> = [];
   for (const cat of activeCats) {
     for (const [lo, hi] of activeBuckets) {
@@ -302,35 +335,24 @@ async function discoverVehicleIds(
     }
   }
 
-  const DISCOVERY_CONCURRENCY = 8;
+  const DISCOVERY_CONCURRENCY = 16;
   let taskIdx = 0;
   async function discoveryWorker() {
     while (taskIdx < tasks.length) {
       const t = tasks[taskIdx++];
       let res;
       try {
-        res = await apifyText(t.url, { timeoutMs: 20_000 });
+        res = await apifyText(t.url, { timeoutMs: 25_000 });
       } catch (e) {
         console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
         continue;
       }
       if (res.status !== 200) continue;
       const before = found.size;
-      // Each worker uses its OWN regex instance so the shared `cityRe.lastIndex`
-      // doesn't get clobbered across concurrent workers.
-      const localRe = new RegExp(cityRe.source, cityRe.flags);
-      let m: RegExpExecArray | null;
-      while ((m = localRe.exec(res.body)) !== null) {
-        const [whole, type, make, model, id] = m;
-        if (!found.has(id)) {
-          found.set(id, {
-            id,
-            href: `https://turo.com${whole}`,
-            make: make.replace(/-/g, " "),
-            model: model.replace(/-/g, " "),
-            type,
-          });
-        }
+      const chunks = res.body.split(CARD_SPLIT).slice(1);
+      for (const chunk of chunks) {
+        const row = parseCard(chunk, citySlug);
+        if (row && !found.has(row.vehicle_id)) found.set(row.vehicle_id, row);
       }
       console.log(`  ${t.cat} $${t.lo}-${t.hi}: +${found.size - before} (total ${found.size})`);
     }
@@ -395,12 +417,24 @@ async function fetchVehicle(
   v: { id: string; href: string; make: string; model: string; type: string },
   citySlug: string,
 ) {
+  // First attempt: fast plain-HTTP fetch via residential proxy.
   let res = await apifyText(v.href);
   let source = "apify";
 
-  // If Apify got a non-200 OR a Cloudflare challenge page, try backup proxy.
+  // Turo's detail pages enforce Cloudflare harder than landing pages, so the
+  // plain-HTTP fetch often returns 403. A residential *browser* render passes
+  // the challenge — retry with render_js when the fast fetch was blocked.
   if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
-    console.warn(`detail ${v.id}: apify status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
+    console.warn(`detail ${v.id}: apify status=${res.status} blocked=${isBlockedPage(res.body)} — retrying with residential browser render`);
+    const br = await apifyText(v.href, { browser: true, timeoutMs: 35_000 });
+    if (br.status === 200 && !isBlockedPage(br.body) && extractLdProduct(br.body)) {
+      res = br;
+      source = "apify_browser";
+    }
+  }
+
+  // Last resort: backup proxy (Geonix/Turo proxy).
+  if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
     const bp = await backupProxyText(v.href);
     if (bp.body && !isBlockedPage(bp.body) && extractLdProduct(bp.body)) {
       res = bp;
@@ -408,12 +442,12 @@ async function fetchVehicle(
     }
   }
 
-  if (res.status !== 200 && source === "apify") {
+  if (res.status !== 200 && (source === "apify" || source === "apify_browser")) {
     console.warn(`detail ${v.id}: status ${res.status}, no fallback succeeded`);
     return null;
   }
   if (isBlockedPage(res.body)) {
-    console.warn(`detail ${v.id}: blocked page from both providers — skipping`);
+    console.warn(`detail ${v.id}: blocked page from all providers — skipping`);
     return null;
   }
 
@@ -689,6 +723,7 @@ async function runScrape(citySlug: string) {
         place_id: city.place_id,
       },
       urlSlug,
+      citySlug,
       filters,
     );
     console.log(`Discovered ${found.length} unique vehicle URLs`);
@@ -700,10 +735,8 @@ async function runScrape(citySlug: string) {
         .eq("id", runId);
     }
 
-    // Fetch detail pages with limited concurrency.
-    // Apify SuperScraper runs in standby and handles parallel requests well, so
-    // we raise concurrency to 8 to fit all detail fetches inside the wall budget.
-    const CONCURRENCY = 8;
+    // Listings are parsed directly from the SSR card markup, so there's no
+    // detail-fetch phase — just a fast synchronous validation/upsert pass.
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
@@ -776,105 +809,99 @@ async function runScrape(citySlug: string) {
     // round-trips and contributing to CPU exhaustion.
     const anomalyQueue: Array<Record<string, unknown>> = [];
 
-    async function worker() {
-      while (i < found.length) {
-        // Honor the wall-clock deadline — bail before the runtime kills us.
-        if (Date.now() > deadlineMs) {
-          stoppedEarly = true;
-          return;
+    // Rows are already fully parsed from the listing-page cards (no per-vehicle
+    // network calls), so this is a fast synchronous validation pass.
+    for (i = 0; i < found.length; i++) {
+      if (Date.now() > deadlineMs) {
+        stoppedEarly = true;
+        break;
+      }
+      const row = found[i];
+      try {
+        // ---- Validity filters: drop incomplete / suspicious listings ----
+        const missing: string[] = [];
+        if (!row.make || !String(row.make).trim()) missing.push("make");
+        if (!row.model || !String(row.model).trim()) missing.push("model");
+        if (row.year == null) missing.push("year");
+        if (missing.length) {
+          const reason = `missing_fields:${missing.join(",")}`;
+          bumpDropped(reason);
+          anomalyQueue.push({
+            vehicle_id: row.vehicle_id,
+            city: citySlug,
+            make: row.make ?? null,
+            model: row.model ?? null,
+            year: row.year ?? null,
+            attempted_price: row.avg_daily_price ?? null,
+            previous_price: null,
+            kept_price: null,
+            reason,
+            source: "validity_filter",
+            listing_url: row.listing_url,
+          });
+          continue;
         }
-        const idx = i++;
-        const v = found[idx];
-        try {
-          const row = await fetchVehicle(v, citySlug);
-          if (!row) continue;
-
-          // ---- Validity filters: drop incomplete / suspicious listings ----
-          const missing: string[] = [];
-          if (!row.make || !String(row.make).trim()) missing.push("make");
-          if (!row.model || !String(row.model).trim()) missing.push("model");
-          if (row.year == null) missing.push("year");
-          if (missing.length) {
-            const reason = `missing_fields:${missing.join(",")}`;
-            bumpDropped(reason);
-            anomalyQueue.push({
-              vehicle_id: row.vehicle_id,
-              city: citySlug,
-              make: row.make ?? null,
-              model: row.model ?? null,
-              year: row.year ?? null,
-              attempted_price: row.avg_daily_price ?? null,
-              previous_price: null,
-              kept_price: null,
-              reason,
-              source: "validity_filter",
-              listing_url: row.listing_url ?? v.href,
-            });
-            continue;
-          }
-          if (row.year != null && (row.year < YEAR_MIN || row.year > YEAR_MAX)) {
-            const reason = `suspicious_year:${row.year}`;
-            bumpDropped(reason);
-            anomalyQueue.push({
-              vehicle_id: row.vehicle_id,
-              city: citySlug,
-              make: row.make ?? null,
-              model: row.model ?? null,
-              year: row.year,
-              attempted_price: row.avg_daily_price ?? null,
-              previous_price: null,
-              kept_price: null,
-              reason,
-              source: "validity_filter",
-              listing_url: row.listing_url ?? v.href,
-            });
-            continue;
-          }
-          const trips = row.completed_trips ?? 0;
-          const rating = row.rating ?? 0;
-          if ((trips > 0 && rating === 0) || (rating > 0 && trips === 0)) {
-            const reason = `inconsistent_trips_rating:trips=${trips},rating=${rating}`;
-            bumpDropped(reason);
-            anomalyQueue.push({
-              vehicle_id: row.vehicle_id,
-              city: citySlug,
-              make: row.make ?? null,
-              model: row.model ?? null,
-              year: row.year ?? null,
-              attempted_price: row.avg_daily_price ?? null,
-              previous_price: null,
-              kept_price: null,
-              reason,
-              source: "validity_filter",
-              listing_url: row.listing_url ?? v.href,
-            });
-            continue;
-          }
-
-          // ---- User filters (apply only when enabled) ----
-          if (filters) {
-            if (filters.min_year != null && row.year != null && row.year < filters.min_year) continue;
-            if (filters.max_year != null && row.year != null && row.year > filters.max_year) continue;
-            if (filters.min_daily_price != null && row.avg_daily_price != null && row.avg_daily_price < filters.min_daily_price) continue;
-            if (filters.max_daily_price != null && row.avg_daily_price != null && row.avg_daily_price > filters.max_daily_price) continue;
-            if (filters.min_trips != null && (row.completed_trips ?? 0) < filters.min_trips) continue;
-            if (filters.min_rating != null && (row.rating ?? 0) < filters.min_rating) continue;
-            if (filters.fuel_types.length > 0 && row.fuel_type) {
-              if (!filters.fuel_types.includes(String(row.fuel_type).toUpperCase())) continue;
-            }
-          }
-          vehicles.push(row);
-
-          // Flush when we hit the batch threshold so partial progress is durable.
-          if (vehicles.length - flushedCount >= FLUSH_EVERY) {
-            await flushBatch();
-          }
-        } catch (e) {
-          console.warn(`vehicle ${v.id} error:`, e);
+        if (row.year != null && (row.year < YEAR_MIN || row.year > YEAR_MAX)) {
+          const reason = `suspicious_year:${row.year}`;
+          bumpDropped(reason);
+          anomalyQueue.push({
+            vehicle_id: row.vehicle_id,
+            city: citySlug,
+            make: row.make ?? null,
+            model: row.model ?? null,
+            year: row.year,
+            attempted_price: row.avg_daily_price ?? null,
+            previous_price: null,
+            kept_price: null,
+            reason,
+            source: "validity_filter",
+            listing_url: row.listing_url,
+          });
+          continue;
         }
+        const trips = row.completed_trips ?? 0;
+        const rating = row.rating ?? 0;
+        if ((trips > 0 && rating === 0) || (rating > 0 && trips === 0)) {
+          const reason = `inconsistent_trips_rating:trips=${trips},rating=${rating}`;
+          bumpDropped(reason);
+          anomalyQueue.push({
+            vehicle_id: row.vehicle_id,
+            city: citySlug,
+            make: row.make ?? null,
+            model: row.model ?? null,
+            year: row.year ?? null,
+            attempted_price: row.avg_daily_price ?? null,
+            previous_price: null,
+            kept_price: null,
+            reason,
+            source: "validity_filter",
+            listing_url: row.listing_url,
+          });
+          continue;
+        }
+
+        // ---- User filters (apply only when enabled) ----
+        if (filters) {
+          if (filters.min_year != null && row.year != null && row.year < filters.min_year) continue;
+          if (filters.max_year != null && row.year != null && row.year > filters.max_year) continue;
+          if (filters.min_daily_price != null && row.avg_daily_price != null && row.avg_daily_price < filters.min_daily_price) continue;
+          if (filters.max_daily_price != null && row.avg_daily_price != null && row.avg_daily_price > filters.max_daily_price) continue;
+          if (filters.min_trips != null && (row.completed_trips ?? 0) < filters.min_trips) continue;
+          if (filters.min_rating != null && (row.rating ?? 0) < filters.min_rating) continue;
+          if (filters.fuel_types.length > 0 && row.fuel_type) {
+            if (!filters.fuel_types.includes(String(row.fuel_type).toUpperCase())) continue;
+          }
+        }
+        vehicles.push(row);
+
+        // Flush when we hit the batch threshold so partial progress is durable.
+        if (vehicles.length - flushedCount >= FLUSH_EVERY) {
+          await flushBatch();
+        }
+      } catch (e) {
+        console.warn(`vehicle ${row.vehicle_id} error:`, e);
       }
     }
-    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
     const droppedTotal = Object.values(droppedReasons).reduce((a, b) => a + b, 0);
     const elapsedMs = Date.now() - startMs;
     console.log(
