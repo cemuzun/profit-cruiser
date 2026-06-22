@@ -387,16 +387,20 @@ function parseYearAndModel(name: string | undefined, fallbackModel: string) {
   return { year, model };
 }
 
+// Shared wall-clock deadline for the active run. fetchVehicle consults this to
+// decide whether there's still budget for the slow browser-render price retry.
+let detailDeadlineMs = Infinity;
+
 async function fetchVehicle(
   v: { id: string; href: string; make: string; model: string; type: string },
   citySlug: string,
 ) {
-  let res = await zyteText(v.href);
-  let source = "zyte";
+  let res = await apifyText(v.href);
+  let source = "apify";
 
-  // If Zyte got a non-200 OR a Cloudflare challenge page, try backup proxy.
+  // If Apify got a non-200 OR a Cloudflare challenge page, try backup proxy.
   if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
-    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
+    console.warn(`detail ${v.id}: apify status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
     const bp = await backupProxyText(v.href);
     if (bp.body && !isBlockedPage(bp.body) && extractLdProduct(bp.body)) {
       res = bp;
