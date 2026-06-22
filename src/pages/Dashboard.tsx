@@ -440,6 +440,15 @@ export default function Dashboard() {
                           <TableCell className="text-right text-muted-foreground">{fmtUSD(l.price_30d_avg)}</TableCell>
                           <TableCell className="text-right">{l.completed_trips ?? 0}</TableCell>
                           <TableCell className="text-right">{l.rating?.toFixed(2) ?? "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {l.occupancyPct != null && l.occupancyDays >= 7 ? (
+                              <span title={`${l.occupancyDays} calendar days observed`}>{l.occupancyPct}%</span>
+                            ) : (
+                              <span className="text-muted-foreground" title="No calendar data — using assumed utilization">
+                                {l.profit.utilizationPct}%<span className="text-[10px]">*</span>
+                              </span>
+                            )}
+                          </TableCell>
                           <TableCell className="text-right font-semibold">{fmtUSD(l.profit.monthlyProfit)}</TableCell>
                           <TableCell className="text-right">{fmtPct(l.profit.marginPct)}</TableCell>
                           <TableCell><VerdictBadge tone={v.tone} label={v.label} /></TableCell>
