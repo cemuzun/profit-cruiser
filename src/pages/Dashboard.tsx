@@ -165,19 +165,26 @@ export default function Dashboard() {
       return true;
     });
     const withProfit = filtered.map((l) => {
-      // Prefer real calendar occupancy when we have enough observed days;
-      // otherwise fall back to the global utilization assumption.
+      // Prefer measured (actual) occupancy when we have enough observed days;
+      // otherwise fall back to the projected snapshot, then the global assumption.
       const occ = occupancy?.[l.vehicle_id];
+      const effectivePct = occ
+        ? (occ.actualObserved >= 7 ? occ.actualPct : occ.projectedPct)
+        : null;
       const override =
-        occ && occ.observedDays >= 7 ? { utilization_pct: occ.occupancyPct } : null;
+        effectivePct != null && occ && (occ.actualObserved >= 7 || occ.projectedObserved >= 7)
+          ? { utilization_pct: effectivePct }
+          : null;
       const avgs = priceAverages?.[l.vehicle_id];
       return {
         ...l,
         price_7d_avg: l.price_7d_avg ?? avgs?.p7 ?? null,
         price_14d_avg: l.price_14d_avg ?? avgs?.p14 ?? null,
         price_30d_avg: l.price_30d_avg ?? avgs?.p30 ?? null,
-        occupancyPct: occ?.occupancyPct ?? null,
-        occupancyDays: occ?.observedDays ?? 0,
+        actualPct: occ?.actualPct ?? null,
+        actualDays: occ?.actualObserved ?? 0,
+        projectedPct: occ?.projectedPct ?? null,
+        projectedDays: occ?.projectedObserved ?? 0,
         profit: computeProfit(l as any, globalCosts, override),
       };
     });
