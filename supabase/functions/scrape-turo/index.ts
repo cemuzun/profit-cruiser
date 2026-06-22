@@ -330,8 +330,10 @@ function parseCard(chunk: string, citySlug: string, tripDays: number): ParsedVeh
   // All-Star Host badge.
   const isAllStar = /All-Star Host/i.test(text);
 
-  // Location + distance: "Miami • 9.4 mi".
-  const locM = text.match(/([A-Za-z][A-Za-z .'-]*?)\s*[•·]\s*[\d.]+\s*mi\b/);
+  // Location + distance: "... • Miami • 9.4 mi". The city sits between a
+  // bullet and the distance; strip the host badge first so it isn't captured.
+  const locText = text.replace(/All-Star Host/gi, " ").replace(/\s+/g, " ");
+  const locM = locText.match(/[•·]\s*([A-Za-z][A-Za-z .'-]*?)\s*[•·]\s*[\d.]+\s*mi\b/);
   const locationCity = locM ? locM[1].trim() : null;
 
   // Price: trip TOTAL ("$958 total") → daily = total / tripDays.
