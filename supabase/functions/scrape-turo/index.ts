@@ -408,7 +408,7 @@ async function fetchVehicle(
     }
   }
 
-  if (res.status !== 200 && source === "zyte") {
+  if (res.status !== 200 && source === "apify") {
     console.warn(`detail ${v.id}: status ${res.status}, no fallback succeeded`);
     return null;
   }
