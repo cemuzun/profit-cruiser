@@ -164,15 +164,15 @@ function cityUrlSlug(city: { name: string; region: string | null }): string {
 
 // Price buckets ($/day). Turo's listing pages cap at ~30-40 results;
 // splitting by price lets us pull many more vehicles per category.
+// Coarser buckets (4 instead of 8). Apify is slower per request than Zyte, so
+// we trade some long-tail coverage for fitting discovery + detail parsing into
+// the ~150s edge-function wall budget. Residential proxy already returns the
+// full SSR listing page, so each bucket still yields 30-40 vehicles.
 const PRICE_BUCKETS: Array<[number, number]> = [
-  [0, 50],
-  [50, 80],
-  [80, 120],
-  [120, 180],
-  [180, 280],
-  [280, 450],
-  [450, 800],
-  [800, 5000],
+  [0, 80],
+  [80, 180],
+  [180, 450],
+  [450, 5000],
 ];
 
 // Generic regex that matches any Turo vehicle detail URL inside a search/landing page.
