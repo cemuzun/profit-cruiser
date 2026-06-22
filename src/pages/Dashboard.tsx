@@ -165,19 +165,26 @@ export default function Dashboard() {
       return true;
     });
     const withProfit = filtered.map((l) => {
-      // Prefer real calendar occupancy when we have enough observed days;
-      // otherwise fall back to the global utilization assumption.
+      // Prefer measured (actual) occupancy when we have enough observed days;
+      // otherwise fall back to the projected snapshot, then the global assumption.
       const occ = occupancy?.[l.vehicle_id];
+      const effectivePct = occ
+        ? (occ.actualObserved >= 7 ? occ.actualPct : occ.projectedPct)
+        : null;
       const override =
-        occ && occ.observedDays >= 7 ? { utilization_pct: occ.occupancyPct } : null;
+        effectivePct != null && occ && (occ.actualObserved >= 7 || occ.projectedObserved >= 7)
+          ? { utilization_pct: effectivePct }
+          : null;
       const avgs = priceAverages?.[l.vehicle_id];
       return {
         ...l,
         price_7d_avg: l.price_7d_avg ?? avgs?.p7 ?? null,
         price_14d_avg: l.price_14d_avg ?? avgs?.p14 ?? null,
         price_30d_avg: l.price_30d_avg ?? avgs?.p30 ?? null,
-        occupancyPct: occ?.occupancyPct ?? null,
-        occupancyDays: occ?.observedDays ?? 0,
+        actualPct: occ?.actualPct ?? null,
+        actualDays: occ?.actualObserved ?? 0,
+        projectedPct: occ?.projectedPct ?? null,
+        projectedDays: occ?.projectedObserved ?? 0,
         profit: computeProfit(l as any, globalCosts, override),
       };
     });
@@ -429,7 +436,8 @@ export default function Dashboard() {
                       <SortableHead k="p30" label="30d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="trips" label="Trips" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="rating" label="Rating" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
-                      <TableHead className="text-right">Occupancy</TableHead>
+                      <TableHead className="text-right">Actual occ.</TableHead>
+                      <TableHead className="text-right">Projected occ.</TableHead>
                       <SortableHead k="profit" label="Monthly profit" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="margin" label="Margin" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <TableHead>Verdict</TableHead>
@@ -477,10 +485,17 @@ export default function Dashboard() {
                           <TableCell className="text-right">{l.completed_trips ?? 0}</TableCell>
                           <TableCell className="text-right">{l.rating?.toFixed(2) ?? "—"}</TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {l.occupancyPct != null && l.occupancyDays >= 7 ? (
-                              <span title={`${l.occupancyDays} calendar days observed`}>{l.occupancyPct}%</span>
+                            {l.actualPct != null && l.actualDays >= 7 ? (
+                              <span title={`${l.actualDays} past days observed — confirmed bookings`}>{l.actualPct}%</span>
                             ) : (
-                              <span className="text-muted-foreground" title="No calendar data — using assumed utilization">
+                              <span className="text-muted-foreground" title="Not enough observed history yet">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {l.projectedPct != null && l.projectedDays >= 7 ? (
+                              <span title={`${l.projectedDays} upcoming days marked on Turo`}>{l.projectedPct}%</span>
+                            ) : (
+                              <span className="text-muted-foreground" title="No forward calendar data — using assumed utilization">
                                 {l.profit.utilizationPct}%<span className="text-[10px]">*</span>
                               </span>
                             )}
@@ -501,7 +516,7 @@ export default function Dashboard() {
               </div>
             )}
             <p className="text-xs text-muted-foreground">
-              Occupancy is the share of the next 30 calendar days booked on Turo. Profit is calculated from this real occupancy when available; <span className="font-medium">*</span> marks cars with no calendar data yet, which fall back to your assumed utilization.
+              <span className="font-medium">Actual occupancy</span> is measured from confirmed bookings — days we watched flip from available to booked while re-scraping the calendar daily. <span className="font-medium">Projected occupancy</span> is the share of upcoming days already marked unavailable on Turo. Profit uses actual occupancy when enough history exists, otherwise projected; <span className="font-medium">*</span> marks cars with no calendar data, which fall back to your assumed utilization.
             </p>
 
           </CardContent>

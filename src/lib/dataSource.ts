@@ -275,13 +275,32 @@ async function setAnomalyReviewed(id: string, reviewed: boolean) {
   if (error) throw error;
 }
 
-// Real occupancy per vehicle from the scraped Turo calendar.
-// Looks at the next `windowDays` future days and computes the share that are
-// booked (is_available === false), de-duping to the most recent capture per day.
-export type Occupancy = { occupancyPct: number; observedDays: number };
+// Occupancy per vehicle from the scraped Turo calendar, split into two views:
+//
+//  • ACTUAL  — measured from confirmed bookings. Because we re-scrape the
+//    calendar every day, we can watch a future day flip from available -> booked
+//    while we observe it. Each such transition is a real booking that happened.
+//    actualPct = booked days / observed past days (day < today).
+//
+//  • PROJECTED — the current forward-looking snapshot. For upcoming days
+//    (day >= today) we take the most recent capture and count how many are
+//    already marked unavailable. This includes bookings already on the books
+//    plus host-blocked days, so it's an estimate of near-term demand.
+export type Occupancy = {
+  actualPct: number;
+  actualObserved: number;
+  projectedPct: number;
+  projectedObserved: number;
+  // Back-compat: existing callers read occupancyPct/observedDays.
+  occupancyPct: number;
+  observedDays: number;
+};
 
 async function fetchOccupancyByVehicle(windowDays = 30): Promise<Record<string, Occupancy>> {
   const today = new Date().toISOString().slice(0, 10);
+  const start = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
   const end = new Date(Date.now() + windowDays * 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
@@ -295,7 +314,7 @@ async function fetchOccupancyByVehicle(windowDays = 30): Promise<Record<string, 
     const { data, error } = await supabase
       .from("listing_calendar_days")
       .select("vehicle_id, day, is_available, captured_on")
-      .gte("day", today)
+      .gte("day", start)
       .lte("day", end)
       .range(from, from + pageSize - 1);
     if (error) throw error;
@@ -305,29 +324,62 @@ async function fetchOccupancyByVehicle(windowDays = 30): Promise<Record<string, 
     from += pageSize;
   }
 
-  // De-dup: per vehicle+day keep the most recent capture.
-  const latest = new Map<string, Row>();
+  // Group every capture by vehicle+day so we can both look at the latest state
+  // (projected) and replay the capture history to detect bookings (actual).
+  const byDay = new Map<string, Row[]>();
   for (const r of rows) {
     const key = `${r.vehicle_id}|${r.day}`;
-    const existing = latest.get(key);
-    if (!existing || r.captured_on > existing.captured_on) latest.set(key, r);
+    const list = byDay.get(key);
+    if (list) list.push(r);
+    else byDay.set(key, [r]);
   }
 
-  const agg = new Map<string, { booked: number; observed: number }>();
-  for (const r of latest.values()) {
-    if (r.is_available == null) continue; // unknown — don't count
-    const a = agg.get(r.vehicle_id) ?? { booked: 0, observed: 0 };
-    a.observed += 1;
-    if (r.is_available === false) a.booked += 1;
-    agg.set(r.vehicle_id, a);
+  type Agg = { actualBooked: number; actualObs: number; projBooked: number; projObs: number };
+  const agg = new Map<string, Agg>();
+  const get = (id: string) => {
+    let a = agg.get(id);
+    if (!a) { a = { actualBooked: 0, actualObs: 0, projBooked: 0, projObs: 0 }; agg.set(id, a); }
+    return a;
+  };
+
+  for (const [key, list] of byDay) {
+    const [vehicle_id, day] = key.split("|");
+    list.sort((x, y) => (x.captured_on < y.captured_on ? -1 : 1));
+    const a = get(vehicle_id);
+
+    if (day < today) {
+      // ACTUAL: a real booking = a day we watched flip from available -> booked.
+      a.actualObs += 1;
+      let sawAvailable = false;
+      let booked = false;
+      for (const r of list) {
+        if (r.is_available === true) sawAvailable = true;
+        else if (r.is_available === false && sawAvailable) booked = true;
+      }
+      if (booked) a.actualBooked += 1;
+    } else {
+      // PROJECTED: latest known state of an upcoming day.
+      const latest = list[list.length - 1];
+      if (latest.is_available != null) {
+        a.projObs += 1;
+        if (latest.is_available === false) a.projBooked += 1;
+      }
+    }
   }
 
   const out: Record<string, Occupancy> = {};
   for (const [vehicle_id, a] of agg) {
-    if (a.observed === 0) continue;
+    if (a.actualObs === 0 && a.projObs === 0) continue;
+    const actualPct = a.actualObs ? Math.round((a.actualBooked / a.actualObs) * 100) : 0;
+    const projectedPct = a.projObs ? Math.round((a.projBooked / a.projObs) * 100) : 0;
     out[vehicle_id] = {
-      occupancyPct: Math.round((a.booked / a.observed) * 100),
-      observedDays: a.observed,
+      actualPct,
+      actualObserved: a.actualObs,
+      projectedPct,
+      projectedObserved: a.projObs,
+      // Prefer actual when we have a meaningful sample, else fall back to projected.
+      occupancyPct: a.actualObs >= 7 ? actualPct : projectedPct,
+      observedDays: a.actualObs >= 7 ? a.actualObs : a.projObs,
     };
   }
   return out;
