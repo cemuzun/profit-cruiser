@@ -170,8 +170,12 @@ export default function Dashboard() {
       const occ = occupancy?.[l.vehicle_id];
       const override =
         occ && occ.observedDays >= 7 ? { utilization_pct: occ.occupancyPct } : null;
+      const avgs = priceAverages?.[l.vehicle_id];
       return {
         ...l,
+        price_7d_avg: l.price_7d_avg ?? avgs?.p7 ?? null,
+        price_14d_avg: l.price_14d_avg ?? avgs?.p14 ?? null,
+        price_30d_avg: l.price_30d_avg ?? avgs?.p30 ?? null,
         occupancyPct: occ?.occupancyPct ?? null,
         occupancyDays: occ?.observedDays ?? 0,
         profit: computeProfit(l as any, globalCosts, override),
