@@ -345,6 +345,7 @@ export const ds = {
   saveScrapeFilters,
   priceAnomalies: (opts?: { onlyUnreviewed?: boolean; limit?: number }) => fetchPriceAnomalies(opts),
   setAnomalyReviewed,
+  occupancyByVehicle: (windowDays?: number) => fetchOccupancyByVehicle(windowDays),
 
   async addCity(city: Omit<City, "active"> & { active?: boolean }) {
     const { error } = await supabase.from("cities").insert({
