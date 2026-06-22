@@ -78,6 +78,63 @@ async function backupProxyText(url: string): Promise<{ status: number; body: str
   }
 }
 
+// ---------- Firecrawl scraper (PRIMARY, permanent, no proxy bandwidth) ----------
+// Firecrawl handles Turo's Cloudflare/WAF + JS rendering for us. One scrape of a
+// search-results page returns up to ~200 fully-rendered vehicle cards (name,
+// year, rating, trips, host badge, location, image and trip-total price), so we
+// never fetch per-vehicle detail pages. Cost is Firecrawl credits only — zero
+// residential-proxy GB. This is the cheap, provider-independent path.
+const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
+
+// Fixed trip window used for every search URL so the trip-total price → daily
+// price conversion is consistent across listings. A short window minimizes
+// Turo's multi-day discount distortion.
+const TRIP_DAYS = 3;
+function tripWindow(): { start: string; end: string; days: number } {
+  const fmt = (d: Date) =>
+    `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+  const start = new Date(Date.now() + 14 * 86400_000);
+  const end = new Date(start.getTime() + TRIP_DAYS * 86400_000);
+  return { start: fmt(start), end: fmt(end), days: TRIP_DAYS };
+}
+
+async function firecrawlText(
+  url: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ status: number; body: string }> {
+  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 60_000);
+  try {
+    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        formats: ["html"],
+        onlyMainContent: false,
+        waitFor: 9000,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { status: res.status, body: "" };
+    }
+    const data = await res.json();
+    const html = (data?.data?.html ?? data?.html ?? "") as string;
+    return { status: 200, body: html };
+  } catch (e) {
+    console.warn(`firecrawl threw for ${url}:`, e instanceof Error ? e.message : String(e));
+    return { status: 0, body: "" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---------- Apify SuperScraper helpers ----------
 // We use Apify's SuperScraper API (apify/super-scraper-api), a drop-in
 // ScrapingBee-compatible HTML scraper running in standby mode (no per-request
