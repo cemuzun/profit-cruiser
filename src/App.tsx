@@ -14,6 +14,7 @@ import NotFound from "./pages/NotFound.tsx";
 import Cities from "./pages/Cities.tsx";
 import BestCars from "./pages/BestCars.tsx";
 import Admin from "./pages/Admin.tsx";
+import ScrapeLogs from "./pages/ScrapeLogs.tsx";
 
 const queryClient = new QueryClient();
 
