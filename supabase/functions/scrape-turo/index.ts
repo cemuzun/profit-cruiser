@@ -303,9 +303,12 @@ async function discoverVehicleIds(
   }
 
   const DISCOVERY_CONCURRENCY = 16;
+  // Hard cap on discovery wall time so detail parsing always gets budget.
+  const DISCOVERY_DEADLINE_MS = Date.now() + 55_000;
   let taskIdx = 0;
   async function discoveryWorker() {
     while (taskIdx < tasks.length) {
+      if (Date.now() > DISCOVERY_DEADLINE_MS) return;
       const t = tasks[taskIdx++];
       let res;
       try {
