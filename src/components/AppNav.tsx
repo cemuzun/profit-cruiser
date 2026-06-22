@@ -11,6 +11,7 @@ const links = [
   { to: "/compare", label: "Compare", icon: GitCompare },
   { to: "/seasonality", label: "Seasonality", icon: CalendarRange },
   { to: "/admin", label: "Admin", icon: ShieldAlert },
+  { to: "/logs", label: "Logs", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
