@@ -132,10 +132,19 @@ export default function Dashboard() {
       if (p < minP || p > maxP) return false;
       return true;
     });
-    const withProfit = filtered.map((l) => ({
-      ...l,
-      profit: computeProfit(l as any, globalCosts),
-    }));
+    const withProfit = filtered.map((l) => {
+      // Prefer real calendar occupancy when we have enough observed days;
+      // otherwise fall back to the global utilization assumption.
+      const occ = occupancy?.[l.vehicle_id];
+      const override =
+        occ && occ.observedDays >= 7 ? { utilization_pct: occ.occupancyPct } : null;
+      return {
+        ...l,
+        occupancyPct: occ?.occupancyPct ?? null,
+        occupancyDays: occ?.observedDays ?? 0,
+        profit: computeProfit(l as any, globalCosts, override),
+      };
+    });
     const dir = sortDir === "asc" ? 1 : -1;
     const cmp = (a: any, b: any): number => {
       switch (sortKey) {
