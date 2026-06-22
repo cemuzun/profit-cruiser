@@ -943,7 +943,7 @@ Deno.serve(async (req) => {
         .eq("vehicle_id", vehicleId)
         .single();
       const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
-      const r = await zyteText(href);
+      const r = await apifyText(href);
       const html = r.body;
       const ld = extractLdProduct(html);
       const samples: Record<string, string[]> = {};
