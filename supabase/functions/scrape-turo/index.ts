@@ -396,47 +396,61 @@ async function discoverVehicleIds(
 
   const minP = filters?.min_daily_price ?? null;
   const maxP = filters?.max_daily_price ?? null;
-  const activeBuckets = PRICE_BUCKETS.filter(([lo, hi]) => {
-    if (minP != null && hi <= minP) return false;
-    if (maxP != null && lo >= maxP) return false;
-    return true;
-  }).map(([lo, hi]) => [
-    minP != null ? Math.max(lo, minP) : lo,
-    maxP != null ? Math.min(hi, maxP) : hi,
-  ] as [number, number]);
 
-  const tasks: Array<{ cat: string; lo: number; hi: number; url: string }> = [];
+  // Firecrawl renders the full search page (~200 cards each), so a single
+  // request per category usually covers the city's inventory. We only fall back
+  // to price-bucket splitting when the user set an explicit price filter
+  // (so the URL constrains results) — this keeps Firecrawl credit usage low.
+  const { start, end, days } = tripWindow();
+  const buckets: Array<[number | null, number | null]> = (minP != null || maxP != null)
+    ? [[minP, maxP]]
+    : [[null, null]];
+
+  const tasks: Array<{ cat: string; lo: number | null; hi: number | null; url: string }> = [];
   for (const cat of activeCats) {
-    for (const [lo, hi] of activeBuckets) {
+    for (const [lo, hi] of buckets) {
+      const params = new URLSearchParams({
+        startDate: start,
+        startTime: "10:00",
+        endDate: end,
+        endTime: "10:00",
+      });
+      if (lo != null) params.set("minDailyPrice", String(lo));
+      if (hi != null) params.set("maxDailyPrice", String(hi));
       tasks.push({
         cat,
         lo,
         hi,
-        url: `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?minDailyPrice=${lo}&maxDailyPrice=${hi}`,
+        url: `https://turo.com/us/en/${cat}/united-states/${citySlugInUrl}?${params.toString()}`,
       });
     }
   }
 
-  const DISCOVERY_CONCURRENCY = 16;
+  // Firecrawl renders are slow (~10s each); keep concurrency modest to stay
+  // within the edge wall budget while not hammering the Firecrawl plan.
+  const DISCOVERY_CONCURRENCY = 5;
   let taskIdx = 0;
   async function discoveryWorker() {
     while (taskIdx < tasks.length) {
       const t = tasks[taskIdx++];
       let res;
       try {
-        res = await apifyText(t.url, { timeoutMs: 25_000 });
+        res = await firecrawlText(t.url, { timeoutMs: 60_000 });
       } catch (e) {
-        console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
+        console.warn(`firecrawl fetch failed: ${t.cat}`, e instanceof Error ? e.message : String(e));
         continue;
       }
-      if (res.status !== 200) continue;
+      if (res.status !== 200 || !res.body) {
+        console.warn(`firecrawl ${t.cat}: status=${res.status} empty=${!res.body}`);
+        continue;
+      }
       const before = found.size;
       const chunks = res.body.split(CARD_SPLIT).slice(1);
       for (const chunk of chunks) {
-        const row = parseCard(chunk, citySlug);
+        const row = parseCard(chunk, citySlug, days);
         if (row && !found.has(row.vehicle_id)) found.set(row.vehicle_id, row);
       }
-      console.log(`  ${t.cat} $${t.lo}-${t.hi}: +${found.size - before} (total ${found.size})`);
+      console.log(`  ${t.cat}: +${found.size - before} (total ${found.size})`);
     }
   }
   await Promise.all(Array.from({ length: DISCOVERY_CONCURRENCY }, discoveryWorker));
