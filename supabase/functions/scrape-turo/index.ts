@@ -723,6 +723,7 @@ async function runScrape(citySlug: string) {
         place_id: city.place_id,
       },
       urlSlug,
+      citySlug,
       filters,
     );
     console.log(`Discovered ${found.length} unique vehicle URLs`);
