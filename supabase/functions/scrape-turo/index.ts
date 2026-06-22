@@ -723,7 +723,7 @@ async function runScrape(citySlug: string) {
     // Fetch detail pages with limited concurrency.
     // Apify SuperScraper runs in standby and handles parallel requests well, so
     // we raise concurrency to 8 to fit all detail fetches inside the wall budget.
-    const CONCURRENCY = 8;
+    const CONCURRENCY = 12;
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
