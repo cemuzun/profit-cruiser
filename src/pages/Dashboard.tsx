@@ -485,10 +485,17 @@ export default function Dashboard() {
                           <TableCell className="text-right">{l.completed_trips ?? 0}</TableCell>
                           <TableCell className="text-right">{l.rating?.toFixed(2) ?? "—"}</TableCell>
                           <TableCell className="text-right tabular-nums">
-                            {l.occupancyPct != null && l.occupancyDays >= 7 ? (
-                              <span title={`${l.occupancyDays} calendar days observed`}>{l.occupancyPct}%</span>
+                            {l.actualPct != null && l.actualDays >= 7 ? (
+                              <span title={`${l.actualDays} past days observed — confirmed bookings`}>{l.actualPct}%</span>
                             ) : (
-                              <span className="text-muted-foreground" title="No calendar data — using assumed utilization">
+                              <span className="text-muted-foreground" title="Not enough observed history yet">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {l.projectedPct != null && l.projectedDays >= 7 ? (
+                              <span title={`${l.projectedDays} upcoming days marked on Turo`}>{l.projectedPct}%</span>
+                            ) : (
+                              <span className="text-muted-foreground" title="No forward calendar data — using assumed utilization">
                                 {l.profit.utilizationPct}%<span className="text-[10px]">*</span>
                               </span>
                             )}
