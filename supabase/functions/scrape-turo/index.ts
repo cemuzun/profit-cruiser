@@ -282,18 +282,21 @@ type ParsedVehicle = {
 const titleCase = (s: string) =>
   s.replace(/\b\w/g, (c) => c.toUpperCase());
 
-// Parse a single vehicle-card chunk from a Turo listing page into a row.
-// All the data we need is rendered server-side in the card:
-//   href (type/make/model/id), image alt ("Make Model YEAR in City, ST"),
-//   "$NNN/day" price, and an optional "Rating: N out of 5 stars" + "(trips)".
-function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
+// Parse a single vehicle-card chunk from a Firecrawl-rendered Turo search page.
+// The fully hydrated card contains everything we need as visible text:
+//   href (type/make/model/id), image alt ("Make Model YEAR"),
+//   rating + (trips), "All-Star Host" badge, location + distance, and a
+//   trip-TOTAL price (e.g. "$958 total" for the fixed `tripDays` window).
+// We convert the trip total to a daily price by dividing by `tripDays`.
+function parseCard(chunk: string, citySlug: string, tripDays: number): ParsedVehicle | null {
   const hrefM = chunk.match(
-    /href="(https:\/\/turo\.com\/us\/en\/([a-z0-9-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8}))"/,
+    /href="(https:\/\/turo\.com\/us\/en\/([a-z0-9-]+-rental)\/united-states\/[a-z0-9-]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/(\d{4,8}))/,
   );
   if (!hrefM) return null;
-  const [, href, typeSlug, makeSlug, modelSlug, id] = hrefM;
+  const [, hrefRaw, typeSlug, makeSlug, modelSlug, id] = hrefM;
+  const href = hrefRaw.split("?")[0];
 
-  // Image + alt text ("Chevrolet Corvette 2026 in Miami, FL").
+  // Image + alt text ("Mercedes-Benz GLE-Class 2024").
   const imgM = chunk.match(/<img[^>]+alt="([^"]*)"[^>]+src="(https:\/\/images\.turo\.com[^"]+)"/) ??
     chunk.match(/<img[^>]+src="(https:\/\/images\.turo\.com[^"]+)"[^>]+alt="([^"]*)"/);
   let alt = "";
@@ -303,23 +306,45 @@ function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
     else { alt = imgM[2] ?? ""; image = imgM[1]; }
   }
 
-  // Year: from alt (" 2026 in ") or any 4-digit year in the card.
-  const yearM = alt.match(/\b(19|20)\d{2}\b/) ?? chunk.match(/>(\b(?:19|20)\d{2})<\/p>/);
-  const year = yearM ? parseInt(yearM[0].replace(/[^\d]/g, ""), 10) : null;
+  // Strip tags -> normalized visible text stream for the card.
+  const text = chunk
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  // Location from alt ("... in Miami, FL").
-  const locM = alt.match(/ in ([^,<]+),\s*([A-Z]{2})/);
+  // Year: from alt first ("... 2024"), else from the text stream.
+  const yearM = alt.match(/\b(19|20)\d{2}\b/) ?? text.match(/\b(19|20)\d{2}\b/);
+  const year = yearM ? parseInt(yearM[0], 10) : null;
 
-  // Price: "$201</span><span ...>/day".
-  const priceM = chunk.match(/\$\s*([\d,]+)\s*<\/span>\s*<span[^>]*>\s*\/day/i) ??
-    chunk.match(/\$\s*([\d,]+)[^<]*<[^>]*>\s*\/day/i);
-  const price = priceM ? parseInt(priceM[1].replace(/,/g, ""), 10) : null;
-
-  // Rating + trips.
-  const ratingM = chunk.match(/Rating:\s*([\d.]+)\s*out of 5/i);
+  // Rating: standalone "4.93" style number (0-5 with decimals).
+  const ratingM = text.match(/\b([0-5]\.\d{1,2})\b/);
   const rating = ratingM ? parseFloat(ratingM[1]) : null;
-  const tripsM = chunk.match(/\((\d+)\)\s*<\/p>/);
+
+  // Trips: "(65)".
+  const tripsM = text.match(/\((\d{1,5})\)/);
   const trips = tripsM ? parseInt(tripsM[1], 10) : (rating != null ? 0 : null);
+
+  // All-Star Host badge.
+  const isAllStar = /All-Star Host/i.test(text);
+
+  // Location + distance: "Miami • 9.4 mi".
+  const locM = text.match(/([A-Za-z][A-Za-z .'-]*?)\s*[•·]\s*[\d.]+\s*mi\b/);
+  const locationCity = locM ? locM[1].trim() : null;
+
+  // Price: trip TOTAL ("$958 total") → daily = total / tripDays.
+  // Prefer the discounted "$N total"; fall back to the styled total-price span.
+  let total: number | null = null;
+  const totalM = text.match(/\$\s*([\d,]+)\s*total/i);
+  if (totalM) {
+    total = parseInt(totalM[1].replace(/,/g, ""), 10);
+  } else {
+    const spanM = chunk.match(/StyledText-TotalPrice[^>]*>\s*\$\s*([\d,]+)/i);
+    if (spanM) total = parseInt(spanM[1].replace(/,/g, ""), 10);
+  }
+  const price = total != null && tripDays > 0 ? Math.round(total / tripDays) : null;
 
   const make = makeSlug.replace(/-/g, " ");
   const model = modelSlug.replace(/-/g, " ");
@@ -337,13 +362,13 @@ function parseCard(chunk: string, citySlug: string): ParsedVehicle | null {
     currency: "USD",
     completed_trips: trips,
     rating,
-    is_all_star_host: false,
+    is_all_star_host: isAllStar,
     host_id: null,
     host_name: null,
     image_url: image,
     listing_url: href,
-    location_city: locM ? locM[1].trim() : null,
-    location_state: locM ? locM[2] : null,
+    location_city: locationCity,
+    location_state: null,
     latitude: null,
     longitude: null,
     last_scraped_at: new Date().toISOString(),
