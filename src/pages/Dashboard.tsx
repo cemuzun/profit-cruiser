@@ -464,6 +464,10 @@ export default function Dashboard() {
                 </Table>
               </div>
             )}
+            <p className="text-xs text-muted-foreground">
+              Occupancy is the share of the next 30 calendar days booked on Turo. Profit is calculated from this real occupancy when available; <span className="font-medium">*</span> marks cars with no calendar data yet, which fall back to your assumed utilization.
+            </p>
+
           </CardContent>
         </Card>
       </main>
