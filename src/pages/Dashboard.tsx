@@ -213,7 +213,7 @@ export default function Dashboard() {
     };
     withProfit.sort(cmp);
     return withProfit;
-  }, [cityListings, globalCosts, occupancy, priceAverages, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
+  }, [cityListings, globalCosts, occupancy, priceAverages, search, fuelType, cityFilter, minPrice, maxPrice, minActualOcc, sortKey, sortDir]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
