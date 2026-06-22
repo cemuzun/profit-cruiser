@@ -403,12 +403,24 @@ async function fetchVehicle(
   v: { id: string; href: string; make: string; model: string; type: string },
   citySlug: string,
 ) {
+  // First attempt: fast plain-HTTP fetch via residential proxy.
   let res = await apifyText(v.href);
   let source = "apify";
 
-  // If Apify got a non-200 OR a Cloudflare challenge page, try backup proxy.
+  // Turo's detail pages enforce Cloudflare harder than landing pages, so the
+  // plain-HTTP fetch often returns 403. A residential *browser* render passes
+  // the challenge — retry with render_js when the fast fetch was blocked.
   if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
-    console.warn(`detail ${v.id}: apify status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
+    console.warn(`detail ${v.id}: apify status=${res.status} blocked=${isBlockedPage(res.body)} — retrying with residential browser render`);
+    const br = await apifyText(v.href, { browser: true, timeoutMs: 35_000 });
+    if (br.status === 200 && !isBlockedPage(br.body) && extractLdProduct(br.body)) {
+      res = br;
+      source = "apify_browser";
+    }
+  }
+
+  // Last resort: backup proxy (Geonix/Turo proxy).
+  if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
     const bp = await backupProxyText(v.href);
     if (bp.body && !isBlockedPage(bp.body) && extractLdProduct(bp.body)) {
       res = bp;
@@ -416,12 +428,12 @@ async function fetchVehicle(
     }
   }
 
-  if (res.status !== 200 && source === "apify") {
+  if (res.status !== 200 && (source === "apify" || source === "apify_browser")) {
     console.warn(`detail ${v.id}: status ${res.status}, no fallback succeeded`);
     return null;
   }
   if (isBlockedPage(res.body)) {
-    console.warn(`detail ${v.id}: blocked page from both providers — skipping`);
+    console.warn(`detail ${v.id}: blocked page from all providers — skipping`);
     return null;
   }
 
