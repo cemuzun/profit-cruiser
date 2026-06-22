@@ -309,7 +309,7 @@ async function discoverVehicleIds(
       const t = tasks[taskIdx++];
       let res;
       try {
-        res = await zyteText(t.url, { timeoutMs: 20_000 });
+        res = await apifyText(t.url, { timeoutMs: 20_000 });
       } catch (e) {
         console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
         continue;
