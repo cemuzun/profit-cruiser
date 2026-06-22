@@ -280,6 +280,8 @@ export const ds = {
   snapshots: () => fetchSnapshots(),
   forecasts: () => fetchForecasts(),
   runs: () => fetchRuns(),
+  scrapeRuns: (limit?: number) => fetchScrapeRuns(limit),
+  calendarScrapeRuns: (limit?: number) => fetchCalendarScrapeRuns(limit),
   cities: () => fetchCities(),
   scrapeFilters: () => fetchScrapeFilters(),
   saveScrapeFilters,
