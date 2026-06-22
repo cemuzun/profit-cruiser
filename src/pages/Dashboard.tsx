@@ -399,6 +399,19 @@ export default function Dashboard() {
                 className="w-[90px]"
                 inputMode="decimal"
               />
+              <Select
+                value={minActualOcc || "__all__"}
+                onValueChange={(v) => setMinActualOcc(v === "__all__" ? "" : v)}
+              >
+                <SelectTrigger className="w-[150px]"><SelectValue placeholder="Actual occ." /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">Any occ.</SelectItem>
+                  <SelectItem value="20">20%+ actual</SelectItem>
+                  <SelectItem value="40">40%+ actual</SelectItem>
+                  <SelectItem value="60">60%+ actual</SelectItem>
+                  <SelectItem value="80">80%+ actual</SelectItem>
+                </SelectContent>
+              </Select>
               <Select value={fuelType} onValueChange={setFuelType}>
                 <SelectTrigger className="w-[140px]"><SelectValue placeholder="Fuel" /></SelectTrigger>
                 <SelectContent>
@@ -409,11 +422,11 @@ export default function Dashboard() {
                   <SelectItem value="DIESEL">Diesel</SelectItem>
                 </SelectContent>
               </Select>
-              {(search || cityFilter || minPrice || maxPrice || fuelType !== "all") && (
+              {(search || cityFilter || minPrice || maxPrice || minActualOcc || fuelType !== "all") && (
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => { setSearch(""); setCityFilter(""); setMinPrice(""); setMaxPrice(""); setFuelType("all"); }}
+                  onClick={() => { setSearch(""); setCityFilter(""); setMinPrice(""); setMaxPrice(""); setMinActualOcc(""); setFuelType("all"); }}
                 >
                   Clear
                 </Button>
