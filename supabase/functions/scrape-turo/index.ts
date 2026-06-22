@@ -20,7 +20,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
+const APIFY_API_TOKEN = Deno.env.get("APIFY_API_TOKEN")!;
 const TURO_PROXY_URL = Deno.env.get("TURO_PROXY_URL") ?? "";
 const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -78,70 +78,68 @@ async function backupProxyText(url: string): Promise<{ status: number; body: str
   }
 }
 
-// ---------- Zyte helpers ----------
-// Per-request timeout. Zyte itself can hang 30-40s on banned URLs (it keeps
-// retrying internally before giving up). With concurrency=3, that means a
-// single bad city can burn 2+ minutes of wall budget on one fetch. Cap at 25s.
+// ---------- Apify SuperScraper helpers ----------
+// We use Apify's SuperScraper API (apify/super-scraper-api), a drop-in
+// ScrapingBee-compatible HTML scraper running in standby mode (no per-request
+// cold start). Send a URL, get back HTML. Residential proxies + JS rendering
+// handle Turo's Cloudflare protection.
+//   - render_js=false  -> fast plain-HTTP fetch (SSR landing/detail pages)
+//   - render_js=true   -> headless browser render (price text that loads via JS)
+const APIFY_ENDPOINT = "https://super-scraper-api.apify.actor/";
+
+// Per-request timeout. Apify can take a while on browser renders; cap to keep
+// a single bad URL from burning the whole wall budget.
 const ZYTE_TIMEOUT_MS = 25_000;
 
-async function zyteText(
+async function apifyText(
   url: string,
   opts: { browser?: boolean; timeoutMs?: number } = {},
 ): Promise<{ status: number; body: string }> {
-  const reqBody: Record<string, unknown> = { url, geolocation: "US" };
-  if (opts.browser) {
-    // JS-rendered page (needed for Turo /search results which load via XHR).
-    reqBody.browserHtml = true;
-  } else {
-    reqBody.httpResponseBody = true;
-  }
+  const isGz = url.endsWith(".gz");
+  const params = new URLSearchParams({
+    url,
+    render_js: opts.browser ? "true" : "false",
+    premium_proxy: "true",
+    country_code: "US",
+    block_resources: "false",
+    transparent_status_code: "true",
+    device: "desktop",
+  });
+  if (isGz) params.set("binary_target", "true");
+
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? ZYTE_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch("https://api.zyte.com/v1/extract", {
-      method: "POST",
-      headers: {
-        Authorization: "Basic " + btoa(ZYTE_API_KEY + ":"),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(reqBody),
+    res = await fetch(`${APIFY_ENDPOINT}?${params.toString()}`, {
+      method: "GET",
+      headers: { Authorization: "Bearer " + APIFY_API_TOKEN },
       signal: ctrl.signal,
     });
   } finally {
     clearTimeout(timer);
   }
-  if (!res.ok) {
+  if (!res.ok && res.status !== 404) {
     const txt = await res.text();
-    throw new Error(`Zyte ${res.status} for ${url}: ${txt.slice(0, 200)}`);
+    throw new Error(`Apify ${res.status} for ${url}: ${txt.slice(0, 200)}`);
   }
-  const data = await res.json();
-  const status = data.statusCode ?? 0;
+  const status = res.status;
 
-  if (data.browserHtml) {
-    return { status, body: data.browserHtml as string };
-  }
-
-  const raw = data.httpResponseBody as string | undefined;
-  if (!raw) return { status, body: "" };
-
-  // Decode base64
-  const bin = atob(raw);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-
-  // Try gunzip if URL ends in .gz
-  if (url.endsWith(".gz")) {
+  // Gzip sitemap support (legacy path): decode + gunzip the binary body.
+  if (isGz) {
     try {
+      const buf = new Uint8Array(await res.arrayBuffer());
       const ds = new DecompressionStream("gzip");
-      const stream = new Blob([bytes]).stream().pipeThrough(ds);
+      const stream = new Blob([buf]).stream().pipeThrough(ds);
       const text = await new Response(stream).text();
       return { status, body: text };
     } catch {
-      // fall through and return raw
+      return { status, body: "" };
     }
   }
-  return { status, body: new TextDecoder().decode(bytes) };
+
+  const body = await res.text();
+  return { status, body };
 }
 
 // ---------- Discovery ----------
@@ -311,7 +309,7 @@ async function discoverVehicleIds(
       const t = tasks[taskIdx++];
       let res;
       try {
-        res = await zyteText(t.url, { timeoutMs: 20_000 });
+        res = await apifyText(t.url, { timeoutMs: 20_000 });
       } catch (e) {
         console.warn(`landing fetch failed: ${t.cat} $${t.lo}-${t.hi}`, e instanceof Error ? e.message : String(e));
         continue;
@@ -389,16 +387,20 @@ function parseYearAndModel(name: string | undefined, fallbackModel: string) {
   return { year, model };
 }
 
+// Shared wall-clock deadline for the active run. fetchVehicle consults this to
+// decide whether there's still budget for the slow browser-render price retry.
+let detailDeadlineMs = Infinity;
+
 async function fetchVehicle(
   v: { id: string; href: string; make: string; model: string; type: string },
   citySlug: string,
 ) {
-  let res = await zyteText(v.href);
-  let source = "zyte";
+  let res = await apifyText(v.href);
+  let source = "apify";
 
-  // If Zyte got a non-200 OR a Cloudflare challenge page, try backup proxy.
+  // If Apify got a non-200 OR a Cloudflare challenge page, try backup proxy.
   if (res.status !== 200 || isBlockedPage(res.body) || !extractLdProduct(res.body)) {
-    console.warn(`detail ${v.id}: zyte status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
+    console.warn(`detail ${v.id}: apify status=${res.status} blocked=${isBlockedPage(res.body)} — trying backup proxy`);
     const bp = await backupProxyText(v.href);
     if (bp.body && !isBlockedPage(bp.body) && extractLdProduct(bp.body)) {
       res = bp;
@@ -406,7 +408,7 @@ async function fetchVehicle(
     }
   }
 
-  if (res.status !== 200 && source === "zyte") {
+  if (res.status !== 200 && source === "apify") {
     console.warn(`detail ${v.id}: status ${res.status}, no fallback succeeded`);
     return null;
   }
@@ -495,11 +497,15 @@ async function fetchVehicle(
   // RETRY for unmeaningful data: if price is missing OR came from the
   // untrusted ld.offers.price source, retry with JS-rendered browserHtml
   // to capture the real "$NNN/day" text. Alert if retry also fails.
+  // The browser render is expensive (~10-35s via Apify). Only attempt it when
+  // there's still comfortable wall-clock budget left, so a slow retry doesn't
+  // get the whole function killed mid-run and lose unflushed vehicles.
   const isUnmeaningful = price == null || priceSource === "ld-offers-price";
-  if (isUnmeaningful) {
+  const hasBudgetForBrowser = Date.now() < detailDeadlineMs - 40_000;
+  if (isUnmeaningful && hasBudgetForBrowser) {
     console.warn(`detail ${v.id}: unmeaningful price (source=${priceSource || "none"}) — retrying with browser render`);
     try {
-      const r2 = await zyteText(v.href, { browser: true, timeoutMs: 35_000 });
+      const r2 = await apifyText(v.href, { browser: true, timeoutMs: 35_000 });
       if (r2.status === 200 && !isBlockedPage(r2.body)) {
         const dailyMatch2 = r2.body.match(/\$\s*([\d,]+(?:\.\d+)?)\s*(?:\/\s*day|per\s+day)/i);
         const testIdMatch2 = r2.body.match(/data-testid=["'](?:search-result-price|vehicle-price|daily-price)["'][^>]*>\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
@@ -695,8 +701,9 @@ async function runScrape(citySlug: string) {
     }
 
     // Fetch detail pages with limited concurrency.
-    // Lowered from 5 → 3: Zyte was rate-limiting / banning under heavier load.
-    const CONCURRENCY = 3;
+    // Apify SuperScraper runs in standby and handles parallel requests well, so
+    // we raise concurrency to 8 to fit all detail fetches inside the wall budget.
+    const CONCURRENCY = 8;
     const vehicles: any[] = [];
     const droppedReasons: Record<string, number> = {};
     const bumpDropped = (reason: string) => {
@@ -712,6 +719,9 @@ async function runScrape(citySlug: string) {
     const SAFETY_WINDOW_MS = 25_000;
     const startMs = Date.now();
     const deadlineMs = startMs + RUN_BUDGET_MS - SAFETY_WINDOW_MS;
+    // Expose the deadline to fetchVehicle so it can skip the slow browser retry
+    // when time is running out.
+    detailDeadlineMs = deadlineMs;
     let stoppedEarly = false;
 
     // Incremental persist: every N rows we upsert what we have so far and
@@ -937,7 +947,7 @@ Deno.serve(async (req) => {
         .eq("vehicle_id", vehicleId)
         .single();
       const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
-      const r = await zyteText(href);
+      const r = await apifyText(href);
       const html = r.body;
       const ld = extractLdProduct(html);
       const samples: Record<string, string[]> = {};
