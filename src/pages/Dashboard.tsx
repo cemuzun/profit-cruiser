@@ -436,7 +436,8 @@ export default function Dashboard() {
                       <SortableHead k="p30" label="30d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="trips" label="Trips" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="rating" label="Rating" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
-                      <TableHead className="text-right">Occupancy</TableHead>
+                      <TableHead className="text-right">Actual occ.</TableHead>
+                      <TableHead className="text-right">Projected occ.</TableHead>
                       <SortableHead k="profit" label="Monthly profit" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="margin" label="Margin" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <TableHead>Verdict</TableHead>
