@@ -516,7 +516,7 @@ export default function Dashboard() {
               </div>
             )}
             <p className="text-xs text-muted-foreground">
-              Occupancy is the share of the next 30 calendar days booked on Turo. Profit is calculated from this real occupancy when available; <span className="font-medium">*</span> marks cars with no calendar data yet, which fall back to your assumed utilization.
+              <span className="font-medium">Actual occupancy</span> is measured from confirmed bookings — days we watched flip from available to booked while re-scraping the calendar daily. <span className="font-medium">Projected occupancy</span> is the share of upcoming days already marked unavailable on Turo. Profit uses actual occupancy when enough history exists, otherwise projected; <span className="font-medium">*</span> marks cars with no calendar data, which fall back to your assumed utilization.
             </p>
 
           </CardContent>
