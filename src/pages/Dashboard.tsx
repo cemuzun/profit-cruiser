@@ -81,6 +81,12 @@ export default function Dashboard() {
     queryFn: async () => ds.listings(),
   });
 
+  // Real occupancy from the scraped Turo calendar (next 30 days), per vehicle.
+  const { data: occupancy } = useQuery({
+    queryKey: ["occupancy-30d"],
+    queryFn: async () => ds.occupancyByVehicle(30),
+  });
+
   const { data: priceHistory } = useQuery({
     queryKey: ["price-history", city],
     queryFn: async () => {
@@ -126,10 +132,19 @@ export default function Dashboard() {
       if (p < minP || p > maxP) return false;
       return true;
     });
-    const withProfit = filtered.map((l) => ({
-      ...l,
-      profit: computeProfit(l as any, globalCosts),
-    }));
+    const withProfit = filtered.map((l) => {
+      // Prefer real calendar occupancy when we have enough observed days;
+      // otherwise fall back to the global utilization assumption.
+      const occ = occupancy?.[l.vehicle_id];
+      const override =
+        occ && occ.observedDays >= 7 ? { utilization_pct: occ.occupancyPct } : null;
+      return {
+        ...l,
+        occupancyPct: occ?.occupancyPct ?? null,
+        occupancyDays: occ?.observedDays ?? 0,
+        profit: computeProfit(l as any, globalCosts, override),
+      };
+    });
     const dir = sortDir === "asc" ? 1 : -1;
     const cmp = (a: any, b: any): number => {
       switch (sortKey) {
@@ -149,7 +164,7 @@ export default function Dashboard() {
     };
     withProfit.sort(cmp);
     return withProfit;
-  }, [cityListings, globalCosts, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
+  }, [cityListings, globalCosts, occupancy, search, fuelType, cityFilter, minPrice, maxPrice, sortKey, sortDir]);
 
   const kpis = useMemo(() => {
     if (!enriched.length) return null;
@@ -378,6 +393,7 @@ export default function Dashboard() {
                       <SortableHead k="p30" label="30d avg" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="trips" label="Trips" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="rating" label="Rating" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
+                      <TableHead className="text-right">Occupancy</TableHead>
                       <SortableHead k="profit" label="Monthly profit" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <SortableHead k="margin" label="Margin" align="right" sortKey={sortKey} sortDir={sortDir} onClick={toggleSort} />
                       <TableHead>Verdict</TableHead>
@@ -424,6 +440,15 @@ export default function Dashboard() {
                           <TableCell className="text-right text-muted-foreground">{fmtUSD(l.price_30d_avg)}</TableCell>
                           <TableCell className="text-right">{l.completed_trips ?? 0}</TableCell>
                           <TableCell className="text-right">{l.rating?.toFixed(2) ?? "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {l.occupancyPct != null && l.occupancyDays >= 7 ? (
+                              <span title={`${l.occupancyDays} calendar days observed`}>{l.occupancyPct}%</span>
+                            ) : (
+                              <span className="text-muted-foreground" title="No calendar data — using assumed utilization">
+                                {l.profit.utilizationPct}%<span className="text-[10px]">*</span>
+                              </span>
+                            )}
+                          </TableCell>
                           <TableCell className="text-right font-semibold">{fmtUSD(l.profit.monthlyProfit)}</TableCell>
                           <TableCell className="text-right">{fmtPct(l.profit.marginPct)}</TableCell>
                           <TableCell><VerdictBadge tone={v.tone} label={v.label} /></TableCell>
@@ -439,6 +464,10 @@ export default function Dashboard() {
                 </Table>
               </div>
             )}
+            <p className="text-xs text-muted-foreground">
+              Occupancy is the share of the next 30 calendar days booked on Turo. Profit is calculated from this real occupancy when available; <span className="font-medium">*</span> marks cars with no calendar data yet, which fall back to your assumed utilization.
+            </p>
+
           </CardContent>
         </Card>
       </main>
