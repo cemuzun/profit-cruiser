@@ -554,21 +554,29 @@ Deno.serve(async (req) => {
         .select("vehicle_id, city, listing_url")
         .eq("vehicle_id", vehicleId)
         .single();
-      const { start, end } = buildDateRange(WINDOW_DAYS);
-      const apiUrl = `https://turo.com/api/vehicle/daily_pricing/v1?end=${end}&start=${start}&vehicleId=${vehicleId}`;
-      const api = await firecrawlFetch(apiUrl, { formats: ["rawHtml"], waitFor: 0 });
-      const parsed = extractJsonBlob(api.body);
-      const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
+      const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
+      const page = await firecrawlFetch(href, { formats: ["rawHtml"], waitFor: 9000, timeoutMs: 70000 });
+      const patterns = ["dailyPricing", "dailyPrices", "dailyPricingResponses", "unavailableDates", "bookedDates", "wholeDayUnavailable", "availability", "\"calendar\"", "isAvailable"];
+      const hints: Record<string, string> = {};
+      for (const p of patterns) {
+        const idx = page.body.indexOf(p);
+        if (idx >= 0) hints[p] = page.body.slice(idx, idx + 300);
+      }
+      const dates = new Set<string>();
+      const dre = /"(20\d{2}-[01]\d-[0-3]\d)"/g;
+      let dm: RegExpExecArray | null;
+      while ((dm = dre.exec(page.body)) !== null) dates.add(dm[1]);
+      const inline = parseInlineCalendarFromHtml(page.body, vehicleId, existing?.city ?? null);
       return new Response(JSON.stringify({
-        apiUrl,
-        api_status: api.status,
-        api_body_len: api.body.length,
-        api_body_sample: api.body.slice(0, 800),
-        parsed_ok: !!parsed,
-        parsed_rows: parsedRows,
-        listing_url: existing?.listing_url ?? null,
+        href,
+        page_status: page.status,
+        page_body_len: page.body.length,
+        unique_iso_dates: dates.size,
+        hints,
+        inline_rows: inline.length,
       }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
+
 
     // Probe mode: browser-render the canonical listing URL and dump every JSON
     // segment that smells like calendar/availability data. Used to bootstrap
