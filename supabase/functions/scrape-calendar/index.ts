@@ -147,6 +147,76 @@ async function backupProxyFetch(url: string): Promise<{ status: number; body: st
   }
 }
 
+// ---------- Firecrawl fetch (PRIMARY, permanent — same provider as listings) ----------
+// Firecrawl bypasses Turo's Cloudflare/WAF. We use it two ways:
+//   1. Hit Turo's daily_pricing JSON API directly (cheap, structured).
+//   2. Fall back to browser-rendering the listing page (waitFor) and scanning
+//      the hydrated HTML for an inline calendar payload.
+async function firecrawlFetch(
+  url: string,
+  opts: { formats?: string[]; waitFor?: number; timeoutMs?: number } = {},
+): Promise<{ status: number; body: string }> {
+  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 45_000);
+  try {
+    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        url,
+        formats: opts.formats ?? ["rawHtml"],
+        onlyMainContent: false,
+        waitFor: opts.waitFor ?? 0,
+      }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { status: res.status, body: "" };
+    }
+    const data = await res.json();
+    const body = (data?.data?.rawHtml ?? data?.data?.html ?? data?.data?.markdown ?? "") as string;
+    return { status: 200, body };
+  } catch (e) {
+    console.warn(`firecrawl threw for ${url}:`, e instanceof Error ? e.message : String(e));
+    return { status: 0, body: "" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Pull the first balanced JSON object/array out of a text blob (Firecrawl
+ *  wraps JSON-endpoint responses in <html><body><pre>…</pre></body></html>). */
+function extractJsonBlob(text: string): unknown | null {
+  if (!text) return null;
+  // Strip common HTML wrappers first.
+  const stripped = text.replace(/<[^>]+>/g, "").trim();
+  const candidates = [stripped, text];
+  for (const s of candidates) {
+    const startObj = s.indexOf("{");
+    const startArr = s.indexOf("[");
+    let start = -1;
+    if (startObj === -1) start = startArr;
+    else if (startArr === -1) start = startObj;
+    else start = Math.min(startObj, startArr);
+    if (start === -1) continue;
+    const open = s[start];
+    const close = open === "{" ? "}" : "]";
+    const end = s.lastIndexOf(close);
+    if (end <= start) continue;
+    try {
+      return JSON.parse(s.slice(start, end + 1));
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
+
+
 // ---------- Calendar parsing ----------
 type DayRow = {
   vehicle_id: string;
