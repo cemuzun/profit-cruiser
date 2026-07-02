@@ -550,57 +550,6 @@ Deno.serve(async (req) => {
     const startDate = isoDate(body?.startDate);
     const endDate = isoDate(body?.endDate);
 
-    // Firecrawl probe: render listing to get CF cookies, then fetch the
-    // daily_pricing API from inside the page context via executeJavascript.
-    if (body?.fcprobe && vehicleId) {
-      const { data: existing } = await supabase
-        .from("listings_current")
-        .select("vehicle_id, city, listing_url")
-        .eq("vehicle_id", vehicleId)
-        .single();
-      const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
-      const { start, end } = buildDateRange(WINDOW_DAYS);
-      const apiUrl = `https://turo.com/api/vehicle/daily_pricing/v1?end=${end}&start=${start}&vehicleId=${vehicleId}`;
-      const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${FIRECRAWL_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url: href,
-          formats: ["rawHtml"],
-          onlyMainContent: false,
-          waitFor: 6000,
-          proxy: "stealth",
-          actions: [
-            { type: "wait", milliseconds: 3000 },
-            { type: "executeJavascript", script: `(async()=>{const r=await fetch(${JSON.stringify(apiUrl)},{headers:{Accept:"application/json"},credentials:"include"});return await r.text();})()` },
-          ],
-        }),
-      });
-      const rawText = await res.text();
-      let data: any = {};
-      try { data = JSON.parse(rawText); } catch { /* keep rawText */ }
-      const jsReturns = data?.data?.actions?.javascriptReturns ?? data?.actions?.javascriptReturns ?? null;
-      let jsText = "";
-      if (Array.isArray(jsReturns) && jsReturns.length) {
-        const v = jsReturns[0]?.value ?? jsReturns[0];
-        jsText = typeof v === "string" ? v : JSON.stringify(v);
-      }
-      const parsed = jsText ? extractJsonBlob(jsText) : null;
-      const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
-      return new Response(JSON.stringify({
-        apiUrl,
-        http_status: res.status,
-        http_ok: res.ok,
-        raw_head: rawText.slice(0, 500),
-        js_returns_present: !!jsReturns,
-        js_text_head: jsText.slice(0, 300),
-        js_text_len: jsText.length,
-        parsed_ok: !!parsed,
-        parsed_rows: parsedRows,
-        keys: Object.keys(data?.data ?? {}),
-      }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-
 
 
 
