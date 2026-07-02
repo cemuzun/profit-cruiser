@@ -576,7 +576,9 @@ Deno.serve(async (req) => {
           ],
         }),
       });
-      const data = await res.json().catch(() => ({}));
+      const rawText = await res.text();
+      let data: any = {};
+      try { data = JSON.parse(rawText); } catch { /* keep rawText */ }
       const jsReturns = data?.data?.actions?.javascriptReturns ?? data?.actions?.javascriptReturns ?? null;
       let jsText = "";
       if (Array.isArray(jsReturns) && jsReturns.length) {
