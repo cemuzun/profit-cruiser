@@ -547,35 +547,33 @@ Deno.serve(async (req) => {
     const startDate = isoDate(body?.startDate);
     const endDate = isoDate(body?.endDate);
 
-    // Firecrawl probe: dump raw bodies for the daily_pricing API + listing page.
+    // Firecrawl probe: try the daily_pricing API with a Cloudflare-challenge wait.
     if (body?.fcprobe && vehicleId) {
       const { data: existing } = await supabase
         .from("listings_current")
         .select("vehicle_id, city, listing_url")
         .eq("vehicle_id", vehicleId)
         .single();
-      const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
-      const page = await firecrawlFetch(href, { formats: ["rawHtml"], waitFor: 9000, timeoutMs: 70000 });
-      const patterns = ["dailyPricing", "dailyPrices", "dailyPricingResponses", "unavailableDates", "bookedDates", "wholeDayUnavailable", "availability", "\"calendar\"", "isAvailable"];
-      const hints: Record<string, string> = {};
-      for (const p of patterns) {
-        const idx = page.body.indexOf(p);
-        if (idx >= 0) hints[p] = page.body.slice(idx, idx + 300);
-      }
-      const dates = new Set<string>();
-      const dre = /"(20\d{2}-[01]\d-[0-3]\d)"/g;
-      let dm: RegExpExecArray | null;
-      while ((dm = dre.exec(page.body)) !== null) dates.add(dm[1]);
-      const inline = parseInlineCalendarFromHtml(page.body, vehicleId, existing?.city ?? null);
+      const { start, end } = buildDateRange(WINDOW_DAYS);
+      const apiUrl = `https://turo.com/api/vehicle/daily_pricing/v1?end=${end}&start=${start}&vehicleId=${vehicleId}`;
+      const wait = Number(body?.waitFor) || 12000;
+      const api = await firecrawlFetch(apiUrl, { formats: ["rawHtml"], waitFor: wait, timeoutMs: 75000 });
+      const parsed = extractJsonBlob(api.body);
+      const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
+      const dailyIdx = api.body.indexOf("dailyPricing");
       return new Response(JSON.stringify({
-        href,
-        page_status: page.status,
-        page_body_len: page.body.length,
-        unique_iso_dates: dates.size,
-        hints,
-        inline_rows: inline.length,
+        apiUrl,
+        wait,
+        api_status: api.status,
+        api_body_len: api.body.length,
+        api_body_head: api.body.slice(0, 200),
+        has_dailyPricing: dailyIdx >= 0,
+        dailyPricing_ctx: dailyIdx >= 0 ? api.body.slice(dailyIdx, dailyIdx + 300) : null,
+        parsed_ok: !!parsed,
+        parsed_rows: parsedRows,
       }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
+
 
 
     // Probe mode: browser-render the canonical listing URL and dump every JSON
