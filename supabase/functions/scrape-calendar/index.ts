@@ -572,7 +572,7 @@ Deno.serve(async (req) => {
           proxy: "stealth",
           actions: [
             { type: "wait", milliseconds: 3000 },
-            { type: "executeJavascript", script: `return await fetch(${JSON.stringify(apiUrl)}, {headers:{Accept:"application/json"},credentials:"include"}).then(r=>r.text());` },
+            { type: "executeJavascript", script: `(async()=>{const r=await fetch(${JSON.stringify(apiUrl)},{headers:{Accept:"application/json"},credentials:"include"});return await r.text();})()` },
           ],
         }),
       });
