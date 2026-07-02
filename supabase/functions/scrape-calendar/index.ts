@@ -305,10 +305,12 @@ function parseDailyPricingJson(
 }
 
 /**
- * Capture Turo's calendar XHR by rendering the listing in a headless browser
- * with Zyte and intercepting the network response. Turo's frontend hits
- * `/api/vehicle/daily_pricing/v1?vehicleId=…` automatically when the booking
- * widget mounts, so we wait a few seconds after navigation.
+ * Fetch a vehicle's calendar via Firecrawl (permanent provider — Zyte is
+ * suspended). Strategy:
+ *   1. Hit Turo's daily_pricing JSON API directly through Firecrawl. Cheap and
+ *      structured — this is what Turo's own booking widget calls.
+ *   2. Fall back to browser-rendering the listing page and scanning the
+ *      hydrated HTML for an inline calendar payload.
  *
  * Returns parsed rows on success, [] otherwise.
  */
@@ -318,32 +320,28 @@ async function tryBrowserCalendar(
   listingUrl: string | null,
   opts: { startDate?: string; endDate?: string } = {},
 ): Promise<{ rows: DayRow[]; usedSource: "xhr" | "html" | "none" }> {
+  // 1. Direct daily_pricing API call via Firecrawl.
+  const { start, end } = buildDateRange(WINDOW_DAYS);
+  const apiStart = opts.startDate || start;
+  const apiEnd = opts.endDate || end;
+  const apiUrl =
+    `https://turo.com/api/vehicle/daily_pricing/v1?end=${apiEnd}&start=${apiStart}&vehicleId=${vehicleId}`;
+  const api = await firecrawlFetch(apiUrl, { formats: ["rawHtml"], waitFor: 0 });
+  if (api.body) {
+    const parsed = extractJsonBlob(api.body);
+    if (parsed) {
+      const rows = parseDailyPricingJson(parsed, vehicleId, city, "api");
+      if (rows.length) return { rows, usedSource: "xhr" };
+    }
+  }
+
+  // 2. Fall back to browser-rendering the listing page.
   let href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
-  // If a pickup/return window is provided, append it to the listing URL so
-  // Turo's booking widget hydrates the calendar XHR for that exact window.
   if (opts.startDate && opts.endDate) {
     const sep = href.includes("?") ? "&" : "?";
     href = `${href}${sep}startDate=${encodeURIComponent(opts.startDate)}&endDate=${encodeURIComponent(opts.endDate)}`;
   }
-  const r = await zyteFetch(href, {
-    browser: true,
-    captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
-    scrollToSelector: "form",
-    waitSeconds: 6,
-  });
-
-  // Prefer a captured XHR that returned a JSON body. (Zyte's networkCapture
-  // sometimes reports status 0 even on 200 — gate on body shape instead.)
-  for (const cap of r.network) {
-    if (!cap.body || cap.body[0] !== "{") continue;
-    if (!/daily_pricing|calendar|dailyPricing/i.test(cap.url)) continue;
-    let parsed: unknown;
-    try { parsed = JSON.parse(cap.body); } catch { continue; }
-    const rows = parseDailyPricingJson(parsed, vehicleId, city, "xhr");
-    if (rows.length) return { rows, usedSource: "xhr" };
-  }
-
-  // No XHR captured (or all empty): try parsing inline JSON in the rendered HTML.
+  const r = await firecrawlFetch(href, { formats: ["rawHtml"], waitFor: 8000 });
   if (r.body) {
     const inlineRows = parseInlineCalendarFromHtml(r.body, vehicleId, city);
     if (inlineRows.length) return { rows: inlineRows, usedSource: "html" };
