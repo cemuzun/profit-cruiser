@@ -560,13 +560,16 @@ Deno.serve(async (req) => {
       const { start, end } = buildDateRange(WINDOW_DAYS);
       const apiUrl = `https://turo.com/api/vehicle/daily_pricing/v1?end=${end}&start=${start}&vehicleId=${vehicleId}`;
       const wait = Number(body?.waitFor) || 0;
-      const api = await firecrawlFetch(apiUrl, {
-        formats: ["rawHtml"],
-        waitFor: wait,
-        timeoutMs: 90000,
-        proxy: body?.proxy ? String(body.proxy) : "stealth",
-        headers: { Accept: "application/json, text/plain, */*" },
-      });
+      const useProxy = body?.viaProxy;
+      const api = useProxy
+        ? await backupProxyFetch(apiUrl).then((r) => ({ status: r.status, body: r.body }))
+        : await firecrawlFetch(apiUrl, {
+            formats: ["rawHtml"],
+            waitFor: wait,
+            timeoutMs: 90000,
+            proxy: body?.proxy ? String(body.proxy) : "stealth",
+            headers: { Accept: "application/json, text/plain, */*" },
+          });
       const parsed = extractJsonBlob(api.body);
       const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
       const dailyIdx = api.body.indexOf("dailyPricing");
