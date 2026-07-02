@@ -22,7 +22,8 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
+const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY") ?? "";
+const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
 const TURO_PROXY_URL = Deno.env.get("TURO_PROXY_URL") ?? "";
 const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -146,6 +147,79 @@ async function backupProxyFetch(url: string): Promise<{ status: number; body: st
   }
 }
 
+// ---------- Firecrawl fetch (PRIMARY, permanent — same provider as listings) ----------
+// Firecrawl bypasses Turo's Cloudflare/WAF. We use it two ways:
+//   1. Hit Turo's daily_pricing JSON API directly (cheap, structured).
+//   2. Fall back to browser-rendering the listing page (waitFor) and scanning
+//      the hydrated HTML for an inline calendar payload.
+async function firecrawlFetch(
+  url: string,
+  opts: { formats?: string[]; waitFor?: number; timeoutMs?: number; proxy?: string; headers?: Record<string, string> } = {},
+): Promise<{ status: number; body: string }> {
+  if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 45_000);
+  try {
+    const reqBody: Record<string, unknown> = {
+      url,
+      formats: opts.formats ?? ["rawHtml"],
+      onlyMainContent: false,
+      waitFor: opts.waitFor ?? 0,
+    };
+    if (opts.proxy) reqBody.proxy = opts.proxy;
+    if (opts.headers) reqBody.headers = opts.headers;
+    const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(reqBody),
+      signal: ctrl.signal,
+    });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      return { status: res.status, body: "" };
+    }
+    const data = await res.json();
+    const body = (data?.data?.rawHtml ?? data?.data?.html ?? data?.data?.markdown ?? "") as string;
+    return { status: 200, body };
+  } catch (e) {
+    console.warn(`firecrawl threw for ${url}:`, e instanceof Error ? e.message : String(e));
+    return { status: 0, body: "" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Pull the first balanced JSON object/array out of a text blob (Firecrawl
+ *  wraps JSON-endpoint responses in <html><body><pre>…</pre></body></html>). */
+function extractJsonBlob(text: string): unknown | null {
+  if (!text) return null;
+  // Strip common HTML wrappers first.
+  const stripped = text.replace(/<[^>]+>/g, "").trim();
+  const candidates = [stripped, text];
+  for (const s of candidates) {
+    const startObj = s.indexOf("{");
+    const startArr = s.indexOf("[");
+    let start = -1;
+    if (startObj === -1) start = startArr;
+    else if (startArr === -1) start = startObj;
+    else start = Math.min(startObj, startArr);
+    if (start === -1) continue;
+    const open = s[start];
+    const close = open === "{" ? "}" : "]";
+    const end = s.lastIndexOf(close);
+    if (end <= start) continue;
+    try {
+      return JSON.parse(s.slice(start, end + 1));
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
+
+
 // ---------- Calendar parsing ----------
 type DayRow = {
   vehicle_id: string;
@@ -234,10 +308,12 @@ function parseDailyPricingJson(
 }
 
 /**
- * Capture Turo's calendar XHR by rendering the listing in a headless browser
- * with Zyte and intercepting the network response. Turo's frontend hits
- * `/api/vehicle/daily_pricing/v1?vehicleId=…` automatically when the booking
- * widget mounts, so we wait a few seconds after navigation.
+ * Fetch a vehicle's calendar via Firecrawl (permanent provider — Zyte is
+ * suspended). Strategy:
+ *   1. Hit Turo's daily_pricing JSON API directly through Firecrawl. Cheap and
+ *      structured — this is what Turo's own booking widget calls.
+ *   2. Fall back to browser-rendering the listing page and scanning the
+ *      hydrated HTML for an inline calendar payload.
  *
  * Returns parsed rows on success, [] otherwise.
  */
@@ -247,32 +323,28 @@ async function tryBrowserCalendar(
   listingUrl: string | null,
   opts: { startDate?: string; endDate?: string } = {},
 ): Promise<{ rows: DayRow[]; usedSource: "xhr" | "html" | "none" }> {
+  // 1. Direct daily_pricing API call via Firecrawl.
+  const { start, end } = buildDateRange(WINDOW_DAYS);
+  const apiStart = opts.startDate || start;
+  const apiEnd = opts.endDate || end;
+  const apiUrl =
+    `https://turo.com/api/vehicle/daily_pricing/v1?end=${apiEnd}&start=${apiStart}&vehicleId=${vehicleId}`;
+  const api = await firecrawlFetch(apiUrl, { formats: ["rawHtml"], waitFor: 0 });
+  if (api.body) {
+    const parsed = extractJsonBlob(api.body);
+    if (parsed) {
+      const rows = parseDailyPricingJson(parsed, vehicleId, city, "api");
+      if (rows.length) return { rows, usedSource: "xhr" };
+    }
+  }
+
+  // 2. Fall back to browser-rendering the listing page.
   let href = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
-  // If a pickup/return window is provided, append it to the listing URL so
-  // Turo's booking widget hydrates the calendar XHR for that exact window.
   if (opts.startDate && opts.endDate) {
     const sep = href.includes("?") ? "&" : "?";
     href = `${href}${sep}startDate=${encodeURIComponent(opts.startDate)}&endDate=${encodeURIComponent(opts.endDate)}`;
   }
-  const r = await zyteFetch(href, {
-    browser: true,
-    captureUrls: ["daily_pricing", "/api/vehicle/", "calendar"],
-    scrollToSelector: "form",
-    waitSeconds: 6,
-  });
-
-  // Prefer a captured XHR that returned a JSON body. (Zyte's networkCapture
-  // sometimes reports status 0 even on 200 — gate on body shape instead.)
-  for (const cap of r.network) {
-    if (!cap.body || cap.body[0] !== "{") continue;
-    if (!/daily_pricing|calendar|dailyPricing/i.test(cap.url)) continue;
-    let parsed: unknown;
-    try { parsed = JSON.parse(cap.body); } catch { continue; }
-    const rows = parseDailyPricingJson(parsed, vehicleId, city, "xhr");
-    if (rows.length) return { rows, usedSource: "xhr" };
-  }
-
-  // No XHR captured (or all empty): try parsing inline JSON in the rendered HTML.
+  const r = await firecrawlFetch(href, { formats: ["rawHtml"], waitFor: 8000 });
   if (r.body) {
     const inlineRows = parseInlineCalendarFromHtml(r.body, vehicleId, city);
     if (inlineRows.length) return { rows: inlineRows, usedSource: "html" };
@@ -477,6 +549,9 @@ Deno.serve(async (req) => {
       typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
     const startDate = isoDate(body?.startDate);
     const endDate = isoDate(body?.endDate);
+
+
+
 
     // Probe mode: browser-render the canonical listing URL and dump every JSON
     // segment that smells like calendar/availability data. Used to bootstrap
