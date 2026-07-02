@@ -154,24 +154,27 @@ async function backupProxyFetch(url: string): Promise<{ status: number; body: st
 //      the hydrated HTML for an inline calendar payload.
 async function firecrawlFetch(
   url: string,
-  opts: { formats?: string[]; waitFor?: number; timeoutMs?: number } = {},
+  opts: { formats?: string[]; waitFor?: number; timeoutMs?: number; proxy?: string; headers?: Record<string, string> } = {},
 ): Promise<{ status: number; body: string }> {
   if (!FIRECRAWL_API_KEY) return { status: 0, body: "" };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 45_000);
   try {
+    const reqBody: Record<string, unknown> = {
+      url,
+      formats: opts.formats ?? ["rawHtml"],
+      onlyMainContent: false,
+      waitFor: opts.waitFor ?? 0,
+    };
+    if (opts.proxy) reqBody.proxy = opts.proxy;
+    if (opts.headers) reqBody.headers = opts.headers;
     const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${FIRECRAWL_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        url,
-        formats: opts.formats ?? ["rawHtml"],
-        onlyMainContent: false,
-        waitFor: opts.waitFor ?? 0,
-      }),
+      body: JSON.stringify(reqBody),
       signal: ctrl.signal,
     });
     if (!res.ok) {
