@@ -547,6 +547,29 @@ Deno.serve(async (req) => {
     const startDate = isoDate(body?.startDate);
     const endDate = isoDate(body?.endDate);
 
+    // Firecrawl probe: dump raw bodies for the daily_pricing API + listing page.
+    if (body?.fcprobe && vehicleId) {
+      const { data: existing } = await supabase
+        .from("listings_current")
+        .select("vehicle_id, city, listing_url")
+        .eq("vehicle_id", vehicleId)
+        .single();
+      const { start, end } = buildDateRange(WINDOW_DAYS);
+      const apiUrl = `https://turo.com/api/vehicle/daily_pricing/v1?end=${end}&start=${start}&vehicleId=${vehicleId}`;
+      const api = await firecrawlFetch(apiUrl, { formats: ["rawHtml"], waitFor: 0 });
+      const parsed = extractJsonBlob(api.body);
+      const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
+      return new Response(JSON.stringify({
+        apiUrl,
+        api_status: api.status,
+        api_body_len: api.body.length,
+        api_body_sample: api.body.slice(0, 800),
+        parsed_ok: !!parsed,
+        parsed_rows: parsedRows,
+        listing_url: existing?.listing_url ?? null,
+      }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     // Probe mode: browser-render the canonical listing URL and dump every JSON
     // segment that smells like calendar/availability data. Used to bootstrap
     // the parser against Turo's hydrated state.
