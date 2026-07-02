@@ -26,6 +26,7 @@ const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY") ?? "";
 const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
 const TURO_PROXY_URL = Deno.env.get("TURO_PROXY_URL") ?? "";
 const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL") ?? "";
+const APIFY_API_TOKEN = Deno.env.get("APIFY_API_TOKEN") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE);
@@ -192,6 +193,136 @@ async function firecrawlFetch(
   }
 }
 
+// ---------- Apify SuperScraper calendar fetch (PRIMARY) ----------
+// Firecrawl can't intercept Turo's background calendar XHR, and hitting the
+// daily_pricing API directly returns a Cloudflare interstitial. Apify renders
+// the listing page with a residential proxy (establishing valid CF cookies),
+// then we `evaluate` a same-origin fetch to the daily_pricing endpoint from
+// INSIDE the page context — so the request carries the browser's cookies and
+// passes the WAF. The JSON body comes back in `evaluate_results`.
+const APIFY_CAL_ENDPOINT = "https://super-scraper-api.apify.actor/";
+
+let LAST_APIFY_DEBUG: Record<string, unknown> = {};
+
+async function apifyCalendarFetch(
+  vehicleId: string,
+  listingUrl: string | null,
+  apiStart: string,
+  apiEnd: string,
+  opts: { timeoutMs?: number } = {},
+): Promise<{ status: number; jsonText: string; via: string }> {
+  if (!APIFY_API_TOKEN) return { status: 0, jsonText: "", via: "none" };
+
+  const apiUrl =
+    `https://turo.com/api/vehicle/daily_pricing/v1?end=${apiEnd}&start=${apiStart}&vehicleId=${vehicleId}`;
+
+  const looksJson = (s: string) => {
+    const t = s.trim();
+    return t.startsWith("{") || t.startsWith("[");
+  };
+
+  // STRATEGY 1: Direct GET of the daily_pricing API through Apify with a
+  // residential proxy (no browser). Turo's JSON API is often reachable this way
+  // and it's ~5x cheaper than a browser render.
+  {
+    const params = new URLSearchParams({
+      url: apiUrl,
+      render_js: "false",
+      premium_proxy: "true",
+      country_code: "US",
+      device: "desktop",
+      transparent_status_code: "true",
+    });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 45_000);
+    try {
+      const res = await fetch(`${APIFY_CAL_ENDPOINT}?${params.toString()}`, {
+        method: "GET",
+        headers: {
+          Authorization: "Bearer " + APIFY_API_TOKEN,
+          // Spb-* headers get forwarded to the target when forward_headers is on;
+          // Accept helps Turo return JSON.
+        },
+        signal: ctrl.signal,
+      });
+      if (res.ok) {
+        const body = await res.text();
+        if (looksJson(body)) return { status: 200, jsonText: body, via: "direct-api" };
+      } else {
+        await res.body?.cancel().catch(() => {});
+      }
+    } catch { /* fall through to browser render */ }
+    finally { clearTimeout(timer); }
+  }
+
+  // STRATEGY 2: Render the listing page (residential proxy → valid CF cookies),
+  // then `evaluate` a same-origin fetch to the daily_pricing endpoint from
+  // inside the page context. The JSON body lands in evaluate_results.
+  const pageUrl = listingUrl || `https://turo.com/us/en/car-details/${vehicleId}`;
+  const evalScript =
+    `(async()=>{try{const r=await fetch(${JSON.stringify(apiUrl)},{headers:{Accept:"application/json"},credentials:"include"});return await r.text();}catch(e){return "ERR:"+(e&&e.message||e);}})()`;
+  const instructions = {
+    instructions: [
+      { wait: 4000 },
+      { evaluate: evalScript },
+    ],
+    strict: false,
+  };
+  const params = new URLSearchParams({
+    url: pageUrl,
+    render_js: "true",
+    premium_proxy: "true",
+    country_code: "US",
+    block_resources: "false",
+    device: "desktop",
+    json_response: "true",
+    js_scenario: JSON.stringify(instructions),
+  });
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? 75_000);
+  try {
+    const res = await fetch(`${APIFY_CAL_ENDPOINT}?${params.toString()}`, {
+      method: "GET",
+      headers: { Authorization: "Bearer " + APIFY_API_TOKEN },
+      signal: ctrl.signal,
+    });
+    // With json_response the actor returns a JSON envelope even on target 4xx;
+    // parse it regardless so we can still read evaluate_results.
+    const data = await res.json().catch(() => null) as Record<string, any> | null;
+    if (!data) return { status: res.status, jsonText: "", via: "browser" };
+
+    const results = data.evaluate_results ?? data.evaluateResults ?? [];
+    const xhrArr = Array.isArray(data.xhr) ? data.xhr : [];
+    // Capture raw debug for the probe endpoint.
+    LAST_APIFY_DEBUG = {
+      envelope_keys: Object.keys(data),
+      results_len: Array.isArray(results) ? results.length : 0,
+      initial_status: data.initialStatusCode ?? null,
+      resolved_url: data.resolvedUrl ?? null,
+      js_report: JSON.stringify(data.jsScenarioReport ?? {}).slice(0, 600),
+      xhr_len: xhrArr.length,
+      xhr_urls: xhrArr.map((x: any) => x?.url).filter(Boolean).slice(0, 20),
+      body_head: typeof data.body === "string" ? data.body.slice(0, 200) : "",
+    };
+    let jsonText = "";
+    if (Array.isArray(results)) {
+      for (const r of results) {
+        const v = typeof r === "string" ? r : (r?.result ?? r?.value ?? "");
+        const s = typeof v === "string" ? v : JSON.stringify(v);
+        if (s && !s.startsWith("ERR:") && looksJson(s)) { jsonText = s; break; }
+      }
+    }
+    return { status: res.status, jsonText, via: "browser" };
+  } catch (e) {
+    console.warn(`apify calendar threw for ${vehicleId}:`, e instanceof Error ? e.message : String(e));
+    return { status: 0, jsonText: "", via: "browser" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
 /** Pull the first balanced JSON object/array out of a text blob (Firecrawl
  *  wraps JSON-endpoint responses in <html><body><pre>…</pre></body></html>). */
 function extractJsonBlob(text: string): unknown | null {
@@ -327,6 +458,20 @@ async function tryBrowserCalendar(
   const { start, end } = buildDateRange(WINDOW_DAYS);
   const apiStart = opts.startDate || start;
   const apiEnd = opts.endDate || end;
+
+  // 1. PRIMARY: Apify renders the listing page (residential proxy → valid CF
+  //    cookies), then fetches the daily_pricing API from inside the page. This
+  //    is the real background XHR Turo's booking widget fires.
+  const ap = await apifyCalendarFetch(vehicleId, listingUrl, apiStart, apiEnd);
+  if (ap.jsonText) {
+    const parsed = extractJsonBlob(ap.jsonText);
+    if (parsed) {
+      const rows = parseDailyPricingJson(parsed, vehicleId, city, "api");
+      if (rows.length) return { rows, usedSource: "xhr" };
+    }
+  }
+
+  // 2. Fallback: direct daily_pricing API call via Firecrawl.
   const apiUrl =
     `https://turo.com/api/vehicle/daily_pricing/v1?end=${apiEnd}&start=${apiStart}&vehicleId=${vehicleId}`;
   const api = await firecrawlFetch(apiUrl, { formats: ["rawHtml"], waitFor: 0 });
@@ -549,6 +694,31 @@ Deno.serve(async (req) => {
       typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
     const startDate = isoDate(body?.startDate);
     const endDate = isoDate(body?.endDate);
+
+    // Apify debug probe: run the exact Apify calendar fetch and return the raw
+    // JSON text + parsed row count so we can see what Turo returns.
+    if (body?.apiprobe && vehicleId) {
+      const { data: existing } = await supabase
+        .from("listings_current")
+        .select("vehicle_id, city, listing_url")
+        .eq("vehicle_id", vehicleId)
+        .single();
+      const { start, end } = buildDateRange(WINDOW_DAYS);
+      const ap = await apifyCalendarFetch(vehicleId, existing?.listing_url ?? null, startDate || start, endDate || end);
+      const parsed = ap.jsonText ? extractJsonBlob(ap.jsonText) : null;
+      const rows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api") : [];
+      return new Response(JSON.stringify({
+        listing_url: existing?.listing_url ?? null,
+        apify_status: ap.status,
+        apify_via: ap.via,
+        json_text_len: ap.jsonText.length,
+        json_text_head: ap.jsonText.slice(0, 500),
+        parsed_ok: !!parsed,
+        parsed_rows: rows.length,
+        sample_row: rows[0] ?? null,
+        debug: LAST_APIFY_DEBUG,
+      }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
 
 
