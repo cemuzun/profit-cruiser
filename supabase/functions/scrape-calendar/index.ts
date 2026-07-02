@@ -550,41 +550,53 @@ Deno.serve(async (req) => {
     const startDate = isoDate(body?.startDate);
     const endDate = isoDate(body?.endDate);
 
-    // Firecrawl probe: try the daily_pricing API with a Cloudflare-challenge wait.
+    // Firecrawl probe: render listing to get CF cookies, then fetch the
+    // daily_pricing API from inside the page context via executeJavascript.
     if (body?.fcprobe && vehicleId) {
       const { data: existing } = await supabase
         .from("listings_current")
         .select("vehicle_id, city, listing_url")
         .eq("vehicle_id", vehicleId)
         .single();
+      const href = existing?.listing_url || `https://turo.com/us/en/car-details/${vehicleId}`;
       const { start, end } = buildDateRange(WINDOW_DAYS);
       const apiUrl = `https://turo.com/api/vehicle/daily_pricing/v1?end=${end}&start=${start}&vehicleId=${vehicleId}`;
-      const wait = Number(body?.waitFor) || 0;
-      const useProxy = body?.viaProxy;
-      const api = useProxy
-        ? await backupProxyFetch(apiUrl).then((r) => ({ status: r.status, body: r.body }))
-        : await firecrawlFetch(apiUrl, {
-            formats: ["rawHtml"],
-            waitFor: wait,
-            timeoutMs: 90000,
-            proxy: body?.proxy ? String(body.proxy) : "stealth",
-            headers: { Accept: "application/json, text/plain, */*" },
-          });
-      const parsed = extractJsonBlob(api.body);
+      const res = await fetch("https://api.firecrawl.dev/v2/scrape", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${FIRECRAWL_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: href,
+          formats: ["rawHtml"],
+          onlyMainContent: false,
+          waitFor: 6000,
+          proxy: "stealth",
+          actions: [
+            { type: "wait", milliseconds: 3000 },
+            { type: "executeJavascript", script: `return await fetch(${JSON.stringify(apiUrl)}, {headers:{Accept:"application/json"},credentials:"include"}).then(r=>r.text());` },
+          ],
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const jsReturns = data?.data?.actions?.javascriptReturns ?? data?.actions?.javascriptReturns ?? null;
+      let jsText = "";
+      if (Array.isArray(jsReturns) && jsReturns.length) {
+        const v = jsReturns[0]?.value ?? jsReturns[0];
+        jsText = typeof v === "string" ? v : JSON.stringify(v);
+      }
+      const parsed = jsText ? extractJsonBlob(jsText) : null;
       const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
-      const dailyIdx = api.body.indexOf("dailyPricing");
       return new Response(JSON.stringify({
         apiUrl,
-        wait,
-        api_status: api.status,
-        api_body_len: api.body.length,
-        api_body_head: api.body.slice(0, 200),
-        has_dailyPricing: dailyIdx >= 0,
-        dailyPricing_ctx: dailyIdx >= 0 ? api.body.slice(dailyIdx, dailyIdx + 300) : null,
+        http_ok: res.ok,
+        js_returns_present: !!jsReturns,
+        js_text_head: jsText.slice(0, 300),
+        js_text_len: jsText.length,
         parsed_ok: !!parsed,
         parsed_rows: parsedRows,
+        keys: Object.keys(data?.data ?? {}),
       }, null, 2), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
+
 
 
 
