@@ -589,7 +589,9 @@ Deno.serve(async (req) => {
       const parsedRows = parsed ? parseDailyPricingJson(parsed, vehicleId, existing?.city ?? null, "api").length : 0;
       return new Response(JSON.stringify({
         apiUrl,
+        http_status: res.status,
         http_ok: res.ok,
+        raw_head: rawText.slice(0, 500),
         js_returns_present: !!jsReturns,
         js_text_head: jsText.slice(0, 300),
         js_text_len: jsText.length,
