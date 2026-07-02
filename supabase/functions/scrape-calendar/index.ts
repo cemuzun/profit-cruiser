@@ -22,7 +22,8 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY")!;
+const ZYTE_API_KEY = Deno.env.get("ZYTE_API_KEY") ?? "";
+const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
 const TURO_PROXY_URL = Deno.env.get("TURO_PROXY_URL") ?? "";
 const GEONIX_PROXY_URL = Deno.env.get("GEONIX_PROXY_URL") ?? "";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
